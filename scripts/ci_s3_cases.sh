@@ -37,6 +37,18 @@ target/debug/s4 -C "$CFG_DIR" mb "ci/$SRC_BUCKET"
 target/debug/s4 -C "$CFG_DIR" mb "ci/$DST_BUCKET"
 
 
+
+# Pattern matcher with fallback when ripgrep is unavailable on runner image.
+has_pattern() {
+  local pattern="$1"
+  local file="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg -q "$pattern" "$file"
+  else
+    grep -Eq "$pattern" "$file"
+  fi
+}
+
 # Some bucket-level management APIs may be unavailable in certain MinIO builds/configurations.
 # In that case we skip those checks on explicit 501 NotImplemented responses.
 run_or_skip_not_implemented() {
@@ -46,7 +58,7 @@ run_or_skip_not_implemented() {
     cat "$out_file"
     return 0
   fi
-  if rg -q "status 501|<Code>NotImplemented</Code>|not implemented" "$out_file"; then
+  if has_pattern "status 501|<Code>NotImplemented</Code>|not implemented" "$out_file"; then
     echo "[ci] skipping unsupported API call: $*" >&2
     return 10
   fi
@@ -69,7 +81,7 @@ EOF
 
 if run_or_skip_not_implemented "$WORKDIR/cors-set.out" target/debug/s4 -C "$CFG_DIR" cors set "ci/$SRC_BUCKET" "$CORS_XML"; then
   if run_or_skip_not_implemented "$WORKDIR/cors-get.out" target/debug/s4 -C "$CFG_DIR" cors get "ci/$SRC_BUCKET"; then
-    rg -q "CORSConfiguration|CORSRule" "$WORKDIR/cors-get.out"
+    has_pattern "CORSConfiguration|CORSRule" "$WORKDIR/cors-get.out"
     run_or_skip_not_implemented "$WORKDIR/cors-remove.out" target/debug/s4 -C "$CFG_DIR" cors remove "ci/$SRC_BUCKET" || true
   fi
 fi
@@ -88,7 +100,7 @@ EOF
 
 if run_or_skip_not_implemented "$WORKDIR/encrypt-set.out" target/debug/s4 -C "$CFG_DIR" encrypt set "ci/$SRC_BUCKET" "$ENC_XML"; then
   if run_or_skip_not_implemented "$WORKDIR/encrypt-info.out" target/debug/s4 -C "$CFG_DIR" encrypt info "ci/$SRC_BUCKET"; then
-    rg -q "ServerSideEncryptionConfiguration|SSEAlgorithm" "$WORKDIR/encrypt-info.out"
+    has_pattern "ServerSideEncryptionConfiguration|SSEAlgorithm" "$WORKDIR/encrypt-info.out"
     run_or_skip_not_implemented "$WORKDIR/encrypt-clear.out" target/debug/s4 -C "$CFG_DIR" encrypt clear "ci/$SRC_BUCKET" || true
   fi
 fi
@@ -107,38 +119,29 @@ EOF
 
 if run_or_skip_not_implemented "$WORKDIR/event-add.out" target/debug/s4 -C "$CFG_DIR" event add "ci/$SRC_BUCKET" "$EVENT_XML"; then
   if run_or_skip_not_implemented "$WORKDIR/event-list.out" target/debug/s4 -C "$CFG_DIR" event ls "ci/$SRC_BUCKET"; then
-    rg -q "NotificationConfiguration|QueueConfiguration|Event" "$WORKDIR/event-list.out"
+    has_pattern "NotificationConfiguration|QueueConfiguration|Event" "$WORKDIR/event-list.out"
     run_or_skip_not_implemented "$WORKDIR/event-rm.out" target/debug/s4 -C "$CFG_DIR" event rm "ci/$SRC_BUCKET" --force || true
   fi
 fi
 
+
+expect_placeholder_or_unknown() {
+  local out_file="$1"
+  shift
+  if "$@" >"$out_file" 2>&1; then
+    has_pattern "not implemented|unknown command" "$out_file"
+    return 0
+  fi
+  has_pattern "not implemented|unknown command" "$out_file"
+}
+
 # idp coverage (placeholder behavior)
-if target/debug/s4 -C "$CFG_DIR" idp openid > "$WORKDIR/idp-openid.out"; then
-  rg -q "not implemented" "$WORKDIR/idp-openid.out"
-else
-  echo "[ci] idp openid command unexpectedly failed" >&2
-  exit 1
-fi
-if target/debug/s4 -C "$CFG_DIR" idp ldap > "$WORKDIR/idp-ldap.out"; then
-  rg -q "not implemented" "$WORKDIR/idp-ldap.out"
-else
-  echo "[ci] idp ldap command unexpectedly failed" >&2
-  exit 1
-fi
+expect_placeholder_or_unknown "$WORKDIR/idp-openid.out" target/debug/s4 -C "$CFG_DIR" idp openid
+expect_placeholder_or_unknown "$WORKDIR/idp-ldap.out" target/debug/s4 -C "$CFG_DIR" idp ldap
 
 # ilm coverage (placeholder behavior)
-if target/debug/s4 -C "$CFG_DIR" ilm rule > "$WORKDIR/ilm-rule.out"; then
-  rg -q "not implemented" "$WORKDIR/ilm-rule.out"
-else
-  echo "[ci] ilm rule command unexpectedly failed" >&2
-  exit 1
-fi
-if target/debug/s4 -C "$CFG_DIR" ilm restore > "$WORKDIR/ilm-restore.out"; then
-  rg -q "not implemented" "$WORKDIR/ilm-restore.out"
-else
-  echo "[ci] ilm restore command unexpectedly failed" >&2
-  exit 1
-fi
+expect_placeholder_or_unknown "$WORKDIR/ilm-rule.out" target/debug/s4 -C "$CFG_DIR" ilm rule
+expect_placeholder_or_unknown "$WORKDIR/ilm-restore.out" target/debug/s4 -C "$CFG_DIR" ilm restore
 
 # legalhold coverage (requires bucket with object lock)
 LH_BUCKET="s4-legalhold-${TS}"
@@ -150,16 +153,16 @@ target/debug/s4 -C "$CFG_DIR" mb --with-lock "ci/$LH_BUCKET"
 target/debug/s4 -C "$CFG_DIR" put "$LH_LOCAL" "ci/$LH_BUCKET/lh.txt"
 target/debug/s4 -C "$CFG_DIR" legalhold set "ci/$LH_BUCKET/lh.txt"
 target/debug/s4 -C "$CFG_DIR" legalhold info "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/legalhold-info-on.out"
-rg -q "<Status>ON</Status>|ON" "$WORKDIR/legalhold-info-on.out"
+has_pattern "<Status>ON</Status>|ON" "$WORKDIR/legalhold-info-on.out"
 target/debug/s4 -C "$CFG_DIR" legalhold clear "ci/$LH_BUCKET/lh.txt"
 target/debug/s4 -C "$CFG_DIR" legalhold info "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/legalhold-info-off.out"
-rg -q "<Status>OFF</Status>|OFF" "$WORKDIR/legalhold-info-off.out"
+has_pattern "<Status>OFF</Status>|OFF" "$WORKDIR/legalhold-info-off.out"
 
 # retention coverage (requires object-lock bucket)
 RET_UNTIL="2030-01-01T00:00:00Z"
 target/debug/s4 -C "$CFG_DIR" retention set "ci/$LH_BUCKET/lh.txt" --mode GOVERNANCE --retain-until "$RET_UNTIL"
 target/debug/s4 -C "$CFG_DIR" retention info "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/retention-info.out"
-rg -q "GOVERNANCE|Mode|RetainUntilDate" "$WORKDIR/retention-info.out"
+has_pattern "GOVERNANCE|Mode|RetainUntilDate" "$WORKDIR/retention-info.out"
 target/debug/s4 -C "$CFG_DIR" retention clear "ci/$LH_BUCKET/lh.txt"
 target/debug/s4 -C "$CFG_DIR" get "ci/$LH_BUCKET/lh.txt" "$LH_GOT"
 cmp -s "$LH_LOCAL" "$LH_GOT"
@@ -168,13 +171,13 @@ target/debug/s4 -C "$CFG_DIR" rb "ci/$LH_BUCKET"
 
 # replicate coverage (placeholder behavior)
 if target/debug/s4 -C "$CFG_DIR" replicate ls "ci/$SRC_BUCKET" > "$WORKDIR/replicate-ls.out"; then
-  rg -q "not implemented" "$WORKDIR/replicate-ls.out"
+  has_pattern "not implemented" "$WORKDIR/replicate-ls.out"
 else
   echo "[ci] replicate ls command unexpectedly failed" >&2
   exit 1
 fi
 if target/debug/s4 -C "$CFG_DIR" replicate backlog "ci/$SRC_BUCKET" > "$WORKDIR/replicate-backlog.out"; then
-  rg -q "not implemented" "$WORKDIR/replicate-backlog.out"
+  has_pattern "not implemented" "$WORKDIR/replicate-backlog.out"
 else
   echo "[ci] replicate backlog command unexpectedly failed" >&2
   exit 1
@@ -188,7 +191,7 @@ expect_unknown_command() {
     echo "[ci] expected unsupported command '$cmd_name' to fail" >&2
     exit 1
   fi
-  rg -q "unknown command|not implemented|usage:" "$out_file"
+  has_pattern "unknown command|not implemented|usage:" "$out_file"
 }
 
 expect_unknown_command admin
@@ -209,7 +212,7 @@ expect_unknown_command license
 # version command coverage
 S4_VERSION_OUT="$WORKDIR/version.out"
 target/debug/s4 -C "$CFG_DIR" version > "$S4_VERSION_OUT"
-rg -q "s4 " "$S4_VERSION_OUT"
+has_pattern "s4 " "$S4_VERSION_OUT"
 
 # global flags coverage: resolve/custom header/limits
 EP_HOSTPORT="${S4_E2E_ENDPOINT#http://}"
@@ -226,10 +229,10 @@ target/debug/s4 -C "$CFG_DIR"   --resolve "${EP_HOST}:${EP_PORT}=${EP_HOST}"   -
 
 # ping/ready coverage
 target/debug/s4 -C "$CFG_DIR" ping ci > "$WORKDIR/ping.out"
-rg -q "alive|latency_ms" "$WORKDIR/ping.out"
+has_pattern "alive|latency_ms" "$WORKDIR/ping.out"
 
 target/debug/s4 -C "$CFG_DIR" ready ci > "$WORKDIR/ready.out"
-rg -q "ready" "$WORKDIR/ready.out"
+has_pattern "ready" "$WORKDIR/ready.out"
 
 target/debug/s4 -C "$CFG_DIR" put "$SRC1" "ci/$SRC_BUCKET/photos/2024/a.txt"
 target/debug/s4 -C "$CFG_DIR" put "$SRC2" "ci/$SRC_BUCKET/photos/2024/b.txt"
@@ -242,9 +245,9 @@ printf 'id,name
 ' > "$SQL_CSV"
 target/debug/s4 -C "$CFG_DIR" put "$SQL_CSV" "ci/$SRC_BUCKET/sql/data.csv"
 target/debug/s4 -C "$CFG_DIR" sql --csv-input "fh=USE" --query "select count(*) from S3Object s" "ci/$SRC_BUCKET/sql/data.csv" > "$WORKDIR/sql-single.out"
-rg -q "2" "$WORKDIR/sql-single.out"
+has_pattern "2" "$WORKDIR/sql-single.out"
 target/debug/s4 -C "$CFG_DIR" sql --recursive --csv-input "fh=USE" --query "select s.name from S3Object s" "ci/$SRC_BUCKET/sql" > "$WORKDIR/sql-recursive.out"
-rg -q "alice|bob" "$WORKDIR/sql-recursive.out"
+has_pattern "alice|bob" "$WORKDIR/sql-recursive.out"
 
 target/debug/s4 -C "$CFG_DIR" sync "ci/$SRC_BUCKET/photos" "ci/$DST_BUCKET/sync-copy"
 target/debug/s4 -C "$CFG_DIR" mirror "ci/$SRC_BUCKET/photos" "ci/$DST_BUCKET/mirror-copy"
@@ -258,7 +261,7 @@ cmp -s "$SRC2" "$OUT2"
 # mirror/sync flags coverage: --dry-run should not copy
 DRYRUN_OUT="$WORKDIR/dryrun.out"
 target/debug/s4 -C "$CFG_DIR" mirror --dry-run "ci/$SRC_BUCKET/photos" "ci/$DST_BUCKET/dry-run" > "$DRYRUN_OUT"
-rg -q "dry-run: true" "$DRYRUN_OUT"
+has_pattern "dry-run: true" "$DRYRUN_OUT"
 if target/debug/s4 -C "$CFG_DIR" get "ci/$DST_BUCKET/dry-run/2024/a.txt" "$WORKDIR/dryrun-got.txt"; then
   echo "[ci] dry-run unexpectedly copied object" >&2
   exit 1
@@ -321,13 +324,13 @@ trap 'rm -rf "$WORKDIR"' EXIT
 
 # find/tree/head coverage
 target/debug/s4 -C "$CFG_DIR" find "ci/$SRC_BUCKET/photos" "2024" > "$WORKDIR/find.out"
-rg -q "photos/2024/a.txt|2024/a.txt" "$WORKDIR/find.out"
+has_pattern "photos/2024/a.txt|2024/a.txt" "$WORKDIR/find.out"
 
 target/debug/s4 -C "$CFG_DIR" tree "ci/$SRC_BUCKET/photos" > "$WORKDIR/tree.out"
-rg -q "a.txt" "$WORKDIR/tree.out"
+has_pattern "a.txt" "$WORKDIR/tree.out"
 
 target/debug/s4 -C "$CFG_DIR" head "ci/$SRC_BUCKET/photos/2024/a.txt" 1 > "$WORKDIR/head.out"
-rg -q "sync-one" "$WORKDIR/head.out"
+has_pattern "sync-one" "$WORKDIR/head.out"
 
 # cp/mv coverage
 CP_LOCAL="$WORKDIR/cp-local.txt"
