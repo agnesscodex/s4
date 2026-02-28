@@ -92,6 +92,20 @@ target/debug/s4 -C "$CFG_DIR" get "ci/$SRC_BUCKET/pipe/stdin.txt" "$PIPE_GOT"
 cmp -s "$PIPE_EXPECT" "$PIPE_GOT"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$SRC_BUCKET/pipe/stdin.txt"
 
+
+# multipart upload coverage (file > threshold)
+MP_LOCAL="$WORKDIR/multipart.bin"
+MP_GOT="$WORKDIR/multipart-got.bin"
+python3 - <<'PYS' > "$MP_LOCAL"
+import sys
+sys.stdout.buffer.write(b'Z' * (17 * 1024 * 1024))
+PYS
+
+target/debug/s4 -C "$CFG_DIR" put "$MP_LOCAL" "ci/$SRC_BUCKET/mp/large.bin"
+target/debug/s4 -C "$CFG_DIR" get "ci/$SRC_BUCKET/mp/large.bin" "$MP_GOT"
+cmp -s "$MP_LOCAL" "$MP_GOT"
+target/debug/s4 -C "$CFG_DIR" rm "ci/$SRC_BUCKET/mp/large.bin"
+
 target/debug/s4 -C "$CFG_DIR" rm "ci/$SRC_BUCKET/photos/2024/a.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$SRC_BUCKET/photos/2024/b.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/sync-copy/2024/a.txt"

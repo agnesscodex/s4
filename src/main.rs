@@ -4,6 +4,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
@@ -48,6 +49,8 @@ struct SignatureParts {
     authorization: String,
 }
 
+static CURL_INSECURE: AtomicBool = AtomicBool::new(false);
+
 fn main() {
     if let Err(err) = run() {
         eprintln!("error: {err}");
@@ -85,7 +88,8 @@ fn run() -> Result<(), String> {
         eprintln!("[debug] config: {}", config_path.display());
     }
     if opts.insecure {
-        eprintln!("[warn] --insecure is not implemented yet");
+        // Propagate to all curl invocations (including multipart paths).
+        CURL_INSECURE.store(true, Ordering::Relaxed);
     }
 
     match rest[0].as_str() {
@@ -398,16 +402,7 @@ fn handle_s3_command(
             }
             let bucket = req_bucket(&target, "put")?;
             let key = req_key(&target, "put")?;
-            s3_request(
-                alias,
-                "PUT",
-                &bucket,
-                Some(&key),
-                "",
-                Some(&source),
-                None,
-                debug,
-            )?;
+            upload_file_to_s3(alias, &bucket, &key, &source, debug)?;
             if json {
                 println!(
                     "{{\"uploaded\":{{\"bucket\":\"{}\",\"key\":\"{}\"}}}}",
@@ -543,16 +538,7 @@ fn cmd_sync(
             Some(&temp_file),
             debug,
         )?;
-        s3_request(
-            dst_alias,
-            "PUT",
-            &dst_bucket,
-            Some(&dest_key),
-            "",
-            Some(&temp_file),
-            None,
-            debug,
-        )?;
+        upload_file_to_s3(dst_alias, &dst_bucket, &dest_key, &temp_file, debug)?;
         copied += 1;
     }
 
@@ -592,14 +578,11 @@ fn cmd_cp_mv(
             if !body_path.exists() {
                 return Err(format!("source file not found: {}", body_path.display()));
             }
-            s3_request(
+            upload_file_to_s3(
                 &dst_s3.alias,
-                "PUT",
                 &dst_s3.bucket,
-                Some(&dst_s3.key),
-                "",
-                Some(&body_path),
-                None,
+                &dst_s3.key,
+                &body_path,
                 debug,
             )?;
             if command == "mv" {
@@ -838,16 +821,7 @@ fn cmd_pipe(
     let temp_path = env::temp_dir().join(format!("s4-pipe-{}-{}", std::process::id(), ts));
     fs::write(&temp_path, &stdin_bytes).map_err(|e| e.to_string())?;
 
-    let upload_result = s3_request(
-        alias,
-        "PUT",
-        bucket,
-        Some(key),
-        "",
-        Some(&temp_path),
-        None,
-        debug,
-    );
+    let upload_result = upload_file_to_s3(alias, bucket, key, &temp_path, debug);
     let _ = fs::remove_file(&temp_path);
     upload_result?;
 
@@ -1022,6 +996,12 @@ fn s3_request(
     )
 }
 
+fn apply_curl_global_flags(cmd: &mut Command) {
+    if CURL_INSECURE.load(Ordering::Relaxed) {
+        cmd.arg("-k");
+    }
+}
+
 fn s3_request_with_headers(
     alias: &AliasConfig,
     method: &str,
@@ -1072,6 +1052,7 @@ fn s3_request_with_headers(
     }
 
     let mut cmd = Command::new("curl");
+    apply_curl_global_flags(&mut cmd);
     cmd.arg("-sS").arg(&url);
     if method != "HEAD" {
         cmd.arg("-X").arg(method);
@@ -1212,6 +1193,288 @@ fn payload_hash(upload_file: Option<&Path>) -> Result<String, String> {
     } else {
         Ok("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string())
     }
+}
+
+const MULTIPART_THRESHOLD_BYTES: u64 = 16 * 1024 * 1024;
+const MULTIPART_PART_SIZE_BYTES: usize = 8 * 1024 * 1024;
+
+fn upload_file_to_s3(
+    alias: &AliasConfig,
+    bucket: &str,
+    key: &str,
+    path: &Path,
+    debug: bool,
+) -> Result<(), String> {
+    let size = fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if size < MULTIPART_THRESHOLD_BYTES {
+        s3_request(alias, "PUT", bucket, Some(key), "", Some(path), None, debug)?;
+        return Ok(());
+    }
+
+    multipart_upload_file(alias, bucket, key, path, debug)
+}
+
+fn multipart_upload_file(
+    alias: &AliasConfig,
+    bucket: &str,
+    key: &str,
+    path: &Path,
+    debug: bool,
+) -> Result<(), String> {
+    let init_xml = s3_request(
+        alias,
+        "POST",
+        bucket,
+        Some(key),
+        "uploads",
+        None,
+        None,
+        debug,
+    )?;
+    let upload_id = extract_tag_values(&init_xml, "UploadId")
+        .into_iter()
+        .next()
+        .map(|v| xml_unescape(&v))
+        .ok_or_else(|| "multipart init did not return UploadId".to_string())?;
+
+    let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut part_number = 1usize;
+    let mut etags: Vec<(usize, String)> = Vec::new();
+
+    loop {
+        let mut chunk = vec![0u8; MULTIPART_PART_SIZE_BYTES];
+        let n = file.read(&mut chunk).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        chunk.truncate(n);
+
+        let temp_part = env::temp_dir().join(format!(
+            "s4-mpu-part-{}-{}-{}",
+            std::process::id(),
+            part_number,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_nanos()
+        ));
+        fs::write(&temp_part, &chunk).map_err(|e| e.to_string())?;
+
+        let uploaded = upload_part(
+            alias,
+            bucket,
+            key,
+            &upload_id,
+            part_number,
+            &temp_part,
+            debug,
+        );
+        let _ = fs::remove_file(&temp_part);
+        let etag = match uploaded {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = abort_multipart(alias, bucket, key, &upload_id, debug);
+                return Err(e);
+            }
+        };
+
+        etags.push((part_number, etag));
+        part_number += 1;
+    }
+
+    if etags.is_empty() {
+        let _ = abort_multipart(alias, bucket, key, &upload_id, debug);
+        return Err("multipart upload had no parts".to_string());
+    }
+
+    let complete_xml = build_complete_multipart_xml(&etags);
+    let complete_path = env::temp_dir().join(format!(
+        "s4-mpu-complete-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos()
+    ));
+    fs::write(&complete_path, complete_xml).map_err(|e| e.to_string())?;
+
+    let query = format!("uploadId={}", uri_encode_query_component(&upload_id));
+    let complete_res = s3_request(
+        alias,
+        "POST",
+        bucket,
+        Some(key),
+        &query,
+        Some(&complete_path),
+        None,
+        debug,
+    );
+    let _ = fs::remove_file(&complete_path);
+
+    if let Err(err) = complete_res {
+        let _ = abort_multipart(alias, bucket, key, &upload_id, debug);
+        return Err(err);
+    }
+
+    Ok(())
+}
+
+fn upload_part(
+    alias: &AliasConfig,
+    bucket: &str,
+    key: &str,
+    upload_id: &str,
+    part_number: usize,
+    file_path: &Path,
+    debug: bool,
+) -> Result<String, String> {
+    let endpoint = parse_endpoint(&alias.endpoint)?;
+    let mut uri_path = endpoint.base_path.clone();
+    if !bucket.is_empty() {
+        uri_path.push('/');
+        uri_path.push_str(&uri_encode_segment(bucket));
+    }
+    uri_path.push('/');
+    uri_path.push_str(&uri_encode_path(key));
+
+    let query = format!(
+        "partNumber={}&uploadId={}",
+        part_number,
+        uri_encode_query_component(upload_id)
+    );
+    let payload_hash = payload_hash(Some(file_path))?;
+    let sign = sign_v4(
+        "PUT",
+        &uri_path,
+        &query,
+        &endpoint.host,
+        &alias.region,
+        &alias.access_key,
+        &alias.secret_key,
+        &payload_hash,
+    )?;
+
+    let url = format!(
+        "{}://{}{}?{}",
+        endpoint.scheme, endpoint.host, uri_path, query
+    );
+    let mut cmd = Command::new("curl");
+    apply_curl_global_flags(&mut cmd);
+    cmd.arg("-sS")
+        .arg("-X")
+        .arg("PUT")
+        .arg(&url)
+        .arg("-H")
+        .arg(format!("Host: {}", endpoint.host))
+        .arg("-H")
+        .arg(format!("x-amz-date: {}", sign.amz_date))
+        .arg("-H")
+        .arg(format!("x-amz-content-sha256: {}", payload_hash))
+        .arg("-H")
+        .arg(format!("Authorization: {}", sign.authorization))
+        .arg("--data-binary")
+        .arg(format!("@{}", file_path.display()))
+        .arg("-D")
+        .arg("-")
+        .arg("-o")
+        .arg("/dev/null")
+        .arg("-w")
+        .arg(
+            "
+HTTPSTATUS:%{http_code}",
+        );
+
+    if debug {
+        eprintln!("[debug] multipart upload part request: PUT {}", url);
+    }
+
+    let out = cmd.output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!(
+            "multipart part request execution failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let (headers, status_part) = stdout
+        .rsplit_once(
+            "
+HTTPSTATUS:",
+        )
+        .ok_or_else(|| "unable to parse multipart part status".to_string())?;
+    let status = status_part.trim();
+    if !status.starts_with('2') {
+        return Err(format!("multipart part failed with status {}", status));
+    }
+
+    for line in headers.lines() {
+        let l = line.trim();
+        if l.to_ascii_lowercase().starts_with("etag:") {
+            let v = l
+                .split_once(':')
+                .map(|(_, r)| r.trim().trim_matches('"').to_string())
+                .unwrap_or_default();
+            if !v.is_empty() {
+                return Ok(v);
+            }
+        }
+    }
+    Err("multipart part response missing ETag".to_string())
+}
+
+fn abort_multipart(
+    alias: &AliasConfig,
+    bucket: &str,
+    key: &str,
+    upload_id: &str,
+    debug: bool,
+) -> Result<(), String> {
+    let query = format!("uploadId={}", uri_encode_query_component(upload_id));
+    let _ = s3_request(
+        alias,
+        "DELETE",
+        bucket,
+        Some(key),
+        &query,
+        None,
+        None,
+        debug,
+    )?;
+    Ok(())
+}
+
+fn build_complete_multipart_xml(etags: &[(usize, String)]) -> String {
+    let mut out = String::from("<CompleteMultipartUpload>");
+    for (part, etag) in etags {
+        out.push_str("<Part>");
+        out.push_str(&format!("<PartNumber>{}</PartNumber>", part));
+        out.push_str(&format!("<ETag>\"{}\"</ETag>", escape_xml(etag)));
+        out.push_str("</Part>");
+    }
+    out.push_str("</CompleteMultipartUpload>");
+    out
+}
+
+fn escape_xml(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn uri_encode_query_component(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        let c = b as char;
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
+            out.push(c);
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
 }
 
 fn parse_endpoint(raw: &str) -> Result<Endpoint, String> {
@@ -1398,8 +1661,9 @@ FLAGS:
 #[cfg(test)]
 mod tests {
     use super::{
-        AliasConfig, AppConfig, extract_tag_values, looks_ready_xml, parse_config, parse_target,
-        serialize_config, sync_destination_key, uri_encode_path, xml_unescape,
+        AliasConfig, AppConfig, build_complete_multipart_xml, extract_tag_values, looks_ready_xml,
+        parse_config, parse_globals, parse_target, serialize_config, sync_destination_key,
+        uri_encode_path, uri_encode_query_component, xml_unescape,
     };
     use std::collections::BTreeMap;
 
@@ -1471,5 +1735,30 @@ mod tests {
         ));
         assert!(looks_ready_xml("<Error><Code>AccessDenied</Code></Error>"));
         assert!(!looks_ready_xml("not-xml"));
+    }
+
+    #[test]
+    fn build_complete_multipart_xml_contains_parts() {
+        let xml =
+            build_complete_multipart_xml(&[(1, "etag-1".to_string()), (2, "etag-2".to_string())]);
+        assert!(xml.contains("<PartNumber>1</PartNumber>"));
+        assert!(xml.contains("<ETag>\"etag-2\"</ETag>"));
+    }
+
+    #[test]
+    fn uri_encode_query_component_works() {
+        assert_eq!(uri_encode_query_component("a b/+"), "a%20b%2F%2B");
+    }
+
+    #[test]
+    fn parse_globals_insecure_flag() {
+        let (opts, rest) = parse_globals(vec![
+            "--insecure".to_string(),
+            "ls".to_string(),
+            "a/b".to_string(),
+        ])
+        .expect("parse globals should succeed");
+        assert!(opts.insecure);
+        assert_eq!(rest, vec!["ls".to_string(), "a/b".to_string()]);
     }
 }

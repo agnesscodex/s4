@@ -8,6 +8,7 @@
 - Управление alias: `alias set|ls|rm`.
 - S3-команды: `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `sync`, `mirror` (alias к `sync`), `cp`, `mv`, `find`, `tree`, `head`, `pipe`, `ping`, `ready`.
 - AWS SigV4 подпись запросов реализована через встроенный Python helper (`python3`) и HTTP-вызовы через `curl`.
+- Для больших upload-ов (более 16 MiB) реализован multipart upload (`put`, `cp` local->s3, `sync/mirror`, `pipe`).
 - Формат конфига: `~/.s4/config.toml`.
 
 > Текущая сборка поддерживает только alias с `--path-style`.
@@ -116,3 +117,10 @@ GITHUB_TOKEN=... ./scripts/monitor_ci.sh --wait --rerun-failed --sha "$(git rev-
 На текущем этапе в `s4` реализованы: `alias`, `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `sync`, `mirror`, `cp`, `mv`, `find`, `tree`, `head`, `pipe`, `ping`, `ready`.
 
 Остальные команды из полного списка `mc` (например `admin`, `anonymous`, `watch`, `replicate`, `sql`, `tag`, и т.д.) пока **не реализованы** и требуют отдельных итераций.
+
+
+## Флаги: что есть и чего пока нет
+
+Сейчас поддерживаются глобальные флаги: `-C/--config-dir`, `--json`, `--debug`, `--insecure`, `-h/--help`, `-v/--version`.
+
+Флаги из `mc`, которые пока не реализованы: `--resolve`, `--limit-upload`, `--limit-download`, `--custom-header/-H`, `--quiet`, `--disable-pager`, `--no-color`, `--autocompletion` и другие.
