@@ -1141,6 +1141,28 @@ fn parse_legalhold_args(args: &[String]) -> Result<LegalHoldCommand, String> {
     }
 }
 
+fn content_md5_header(file_path: &Path) -> Result<String, String> {
+    let script = r#"
+import base64, hashlib, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+data = p.read_bytes()
+print(base64.b64encode(hashlib.md5(data).digest()).decode())
+"#;
+    let out = Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .arg(file_path)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!(
+            "failed to compute content-md5: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 fn cmd_legalhold(
     config: &AppConfig,
     cmd: LegalHoldCommand,
@@ -1158,7 +1180,9 @@ fn cmd_legalhold(
             let body = "<LegalHold><Status>ON</Status></LegalHold>";
             let temp = env::temp_dir().join(format!("s4-legalhold-{}-on.xml", std::process::id()));
             fs::write(&temp, body).map_err(|e| e.to_string())?;
-            let res = s3_request(
+            let md5 = content_md5_header(&temp)?;
+            let headers = vec![format!("Content-MD5: {}", md5)];
+            let res = s3_request_with_headers(
                 alias,
                 "PUT",
                 &bucket,
@@ -1166,6 +1190,7 @@ fn cmd_legalhold(
                 "legal-hold",
                 Some(&temp),
                 None,
+                &headers,
                 debug,
             );
             let _ = fs::remove_file(&temp);
@@ -1191,7 +1216,9 @@ fn cmd_legalhold(
             let body = "<LegalHold><Status>OFF</Status></LegalHold>";
             let temp = env::temp_dir().join(format!("s4-legalhold-{}-off.xml", std::process::id()));
             fs::write(&temp, body).map_err(|e| e.to_string())?;
-            let res = s3_request(
+            let md5 = content_md5_header(&temp)?;
+            let headers = vec![format!("Content-MD5: {}", md5)];
+            let res = s3_request_with_headers(
                 alias,
                 "PUT",
                 &bucket,
@@ -1199,6 +1226,7 @@ fn cmd_legalhold(
                 "legal-hold",
                 Some(&temp),
                 None,
+                &headers,
                 debug,
             );
             let _ = fs::remove_file(&temp);
@@ -1320,7 +1348,9 @@ fn cmd_retention(
             );
             let temp = env::temp_dir().join(format!("s4-retention-{}-set.xml", std::process::id()));
             fs::write(&temp, body).map_err(|e| e.to_string())?;
-            let res = s3_request(
+            let md5 = content_md5_header(&temp)?;
+            let headers = vec![format!("Content-MD5: {}", md5)];
+            let res = s3_request_with_headers(
                 alias,
                 "PUT",
                 &bucket,
@@ -1328,6 +1358,7 @@ fn cmd_retention(
                 "retention",
                 Some(&temp),
                 None,
+                &headers,
                 debug,
             );
             let _ = fs::remove_file(&temp);
