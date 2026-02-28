@@ -63,7 +63,8 @@ cleanup() {
 trap cleanup EXIT
 
 run() {
-  echo "+ $*"
+  # Print command trace to stderr so stdout redirections capture only command output.
+  echo "+ $*" >&2
   "$@"
 }
 
