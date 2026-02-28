@@ -6,7 +6,7 @@
 
 - Глобальные флаги: `-C/--config-dir`, `--json`, `--debug`, `--insecure`, `--resolve`, `--limit-upload`, `--limit-download`, `--custom-header/-H`.
 - Управление alias: `alias set|ls|rm`.
-- S3-команды: `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `cors`, `encrypt`, `event`, `legalhold`, `retention`, `idp`, `ilm`, `replicate`, `sync`, `mirror` (alias к `sync`), `cp`, `mv`, `find`, `tree`, `head`, `pipe`, `ping`, `ready`.
+- S3-команды: `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `cors`, `encrypt`, `event`, `legalhold`, `retention`, `sql`, `idp`, `ilm`, `replicate`, `sync`, `mirror` (alias к `sync`), `cp`, `mv`, `find`, `tree`, `head`, `pipe`, `ping`, `ready`.
 - AWS SigV4 подпись запросов реализована через встроенный Python helper (`python3`) и HTTP-вызовы через `curl`.
 - Для больших upload-ов (более 16 MiB) реализован multipart upload (`put`, `cp` local->s3, `sync/mirror`, `pipe`).
 - Формат конфига: `~/.s4/config.toml`.
@@ -87,6 +87,10 @@ echo "stream data" | s4 pipe local/test-bucket/stdin.txt
 # checks
 s4 ping local
 s4 ready local
+
+# sql select (S3 Select API)
+s4 sql --query "select * from S3Object" local/test-bucket/data.csv
+s4 sql -r --query "select count(*) from S3Object" local/test-bucket/reports/
 ```
 
 
@@ -175,9 +179,9 @@ GITHUB_TOKEN=... ./scripts/monitor_ci.sh --wait --rerun-failed --sha "$(git rev-
 
 ## Покрытие команд mc vs s4
 
-На текущем этапе в `s4` реализованы: `alias`, `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `cors`, `encrypt`, `event`, `legalhold`, `retention`, `idp` (placeholder), `ilm` (placeholder), `replicate` (placeholder), `sync`, `mirror`, `cp`, `mv`, `find`, `tree`, `head`, `pipe`, `ping`, `ready`.
+На текущем этапе в `s4` реализованы: `alias`, `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `cors`, `encrypt`, `event`, `legalhold`, `retention`, `sql`, `idp` (placeholder), `ilm` (placeholder), `replicate` (placeholder), `sync`, `mirror`, `cp`, `mv`, `find`, `tree`, `head`, `pipe`, `ping`, `ready`.
 
-Остальные команды из полного списка `mc` (например `admin`, `anonymous`, `watch`, `sql`, `tag`, и т.д.) пока **не реализованы** и требуют отдельных итераций.
+Остальные команды из полного списка `mc` (например `admin`, `anonymous`, `watch`, `tag` и т.д.) пока **не реализованы** и требуют отдельных итераций.
 
 
 ## Флаги: что есть и чего пока нет

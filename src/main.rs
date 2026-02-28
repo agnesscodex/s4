@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::Read;
@@ -136,6 +136,19 @@ enum ReplicateSubcommand {
 struct ReplicateCommand {
     subcommand: ReplicateSubcommand,
     target: Option<S3Target>,
+}
+
+#[derive(Debug, Clone)]
+struct SqlOptions {
+    query: String,
+    recursive: bool,
+    csv_input: Option<String>,
+    json_input: Option<String>,
+    compression: Option<String>,
+    csv_output: Option<String>,
+    csv_output_header: Option<String>,
+    json_output: Option<String>,
+    enc_c: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -409,6 +422,7 @@ fn handle_s3_command(
         && command != "legalhold"
         && command != "replicate"
         && command != "retention"
+        && command != "sql"
         && command != "mb"
         && args.len() <= target_idx
     {
@@ -581,6 +595,11 @@ fn handle_s3_command(
     if command == "retention" {
         let rt_cmd = parse_retention_args(args)?;
         return cmd_retention(config, rt_cmd, json, debug);
+    }
+
+    if command == "sql" {
+        let (sql_opts, sql_targets) = parse_sql_args(args)?;
+        return cmd_sql(config, &sql_opts, &sql_targets, json, debug);
     }
 
     if command == "replicate" {
@@ -1436,6 +1455,417 @@ fn cmd_replicate(cmd: ReplicateCommand, json: bool) -> Result<(), String> {
             sub, target
         );
     }
+    Ok(())
+}
+
+fn parse_sql_args(args: &[String]) -> Result<(SqlOptions, Vec<S3Target>), String> {
+    let mut opts = SqlOptions {
+        query: "select * from S3Object".to_string(),
+        recursive: false,
+        csv_input: None,
+        json_input: None,
+        compression: None,
+        csv_output: None,
+        csv_output_header: None,
+        json_output: None,
+        enc_c: Vec::new(),
+    };
+
+    let mut targets = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--query" | "-e" => {
+                let v = args.get(i + 1).ok_or("--query expects a value")?;
+                opts.query = v.to_string();
+                i += 2;
+            }
+            "--recursive" | "-r" => {
+                opts.recursive = true;
+                i += 1;
+            }
+            "--csv-input" => {
+                let v = args.get(i + 1).ok_or("--csv-input expects a value")?;
+                opts.csv_input = Some(v.to_string());
+                i += 2;
+            }
+            "--json-input" => {
+                let v = args.get(i + 1).ok_or("--json-input expects a value")?;
+                opts.json_input = Some(v.to_string());
+                i += 2;
+            }
+            "--compression" => {
+                let v = args.get(i + 1).ok_or("--compression expects a value")?;
+                opts.compression = Some(v.to_string());
+                i += 2;
+            }
+            "--csv-output" => {
+                let v = args.get(i + 1).ok_or("--csv-output expects a value")?;
+                opts.csv_output = Some(v.to_string());
+                i += 2;
+            }
+            "--csv-output-header" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or("--csv-output-header expects a value")?;
+                opts.csv_output_header = Some(v.to_string());
+                i += 2;
+            }
+            "--json-output" => {
+                let v = args.get(i + 1).ok_or("--json-output expects a value")?;
+                opts.json_output = Some(v.to_string());
+                i += 2;
+            }
+            "--enc-c" => {
+                let v = args.get(i + 1).ok_or("--enc-c expects a value")?;
+                opts.enc_c.push(v.to_string());
+                i += 2;
+            }
+            f if f.starts_with('-') => return Err(format!("unknown sql flag: {f}")),
+            _ => {
+                targets.push(parse_target(&args[i])?);
+                i += 1;
+            }
+        }
+    }
+
+    if targets.is_empty() {
+        return Err("usage: s4 sql [FLAGS] <alias/bucket/key|prefix> [TARGET...]".to_string());
+    }
+
+    Ok((opts, targets))
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn parse_kv_options(spec: &str) -> HashMap<String, String> {
+    spec.split(',')
+        .filter_map(|item| {
+            let (k, v) = item.split_once('=')?;
+            Some((k.trim().to_string(), v.to_string()))
+        })
+        .collect()
+}
+
+fn map_csv_input(spec: &str) -> String {
+    let kv = parse_kv_options(spec);
+    let mut out = String::new();
+    out.push_str("<CSV><FileHeaderInfo>");
+    out.push_str(kv.get("fh").map(|v| v.as_str()).unwrap_or("NONE"));
+    out.push_str("</FileHeaderInfo>");
+    if let Some(v) = kv.get("fd") {
+        out.push_str("<FieldDelimiter>");
+        out.push_str(&xml_escape(v));
+        out.push_str("</FieldDelimiter>");
+    }
+    if let Some(v) = kv.get("rd") {
+        out.push_str("<RecordDelimiter>");
+        out.push_str(&xml_escape(v));
+        out.push_str("</RecordDelimiter>");
+    }
+    out.push_str("</CSV>");
+    out
+}
+
+fn map_json_input(spec: &str) -> String {
+    let kv = parse_kv_options(spec);
+    let typ = kv.get("t").map(|v| v.as_str()).unwrap_or("DOCUMENT");
+    format!("<JSON><Type>{}</Type></JSON>", xml_escape(typ))
+}
+
+fn map_csv_output(spec: Option<&str>, header: Option<&str>) -> String {
+    let kv = spec.map(parse_kv_options).unwrap_or_default();
+    let mut out = String::new();
+    out.push_str("<CSV>");
+    if let Some(v) = kv.get("fd") {
+        out.push_str("<FieldDelimiter>");
+        out.push_str(&xml_escape(v));
+        out.push_str("</FieldDelimiter>");
+    }
+    if let Some(v) = kv.get("rd") {
+        out.push_str("<RecordDelimiter>");
+        out.push_str(&xml_escape(v));
+        out.push_str("</RecordDelimiter>");
+    }
+    if let Some(v) = header {
+        out.push_str("<QuoteFields>");
+        if v.is_empty() {
+            out.push_str("ASNEEDED");
+        } else {
+            out.push_str("ALWAYS");
+        }
+        out.push_str("</QuoteFields>");
+    }
+    out.push_str("</CSV>");
+    out
+}
+
+fn map_json_output(spec: Option<&str>) -> String {
+    let kv = spec.map(parse_kv_options).unwrap_or_default();
+    let mut out = String::new();
+    out.push_str("<JSON>");
+    if let Some(v) = kv.get("rd") {
+        out.push_str("<RecordDelimiter>");
+        out.push_str(&xml_escape(v));
+        out.push_str("</RecordDelimiter>");
+    }
+    out.push_str("</JSON>");
+    out
+}
+
+fn build_select_request_xml(opts: &SqlOptions) -> String {
+    let input = if let Some(csv) = &opts.csv_input {
+        map_csv_input(csv)
+    } else if let Some(json) = &opts.json_input {
+        map_json_input(json)
+    } else {
+        "<CSV><FileHeaderInfo>NONE</FileHeaderInfo></CSV>".to_string()
+    };
+
+    let output = if opts.json_output.is_some() {
+        map_json_output(opts.json_output.as_deref())
+    } else {
+        map_csv_output(
+            opts.csv_output.as_deref(),
+            opts.csv_output_header.as_deref(),
+        )
+    };
+
+    let compression = opts.compression.as_deref().unwrap_or("NONE").to_string();
+
+    format!(
+        "<SelectObjectContentRequest><Expression>{}</Expression><ExpressionType>SQL</ExpressionType><InputSerialization>{}<CompressionType>{}</CompressionType></InputSerialization><OutputSerialization>{}</OutputSerialization></SelectObjectContentRequest>",
+        xml_escape(&opts.query),
+        input,
+        xml_escape(&compression),
+        output
+    )
+}
+
+fn s3_request_bytes_with_headers(
+    alias: &AliasConfig,
+    method: &str,
+    bucket: &str,
+    key: Option<&str>,
+    query: &str,
+    upload_file: Option<&Path>,
+    extra_headers: &[String],
+    debug: bool,
+) -> Result<Vec<u8>, String> {
+    let endpoint = parse_endpoint(&alias.endpoint)?;
+    let mut uri_path = endpoint.base_path.clone();
+
+    if alias.path_style {
+        if !bucket.is_empty() {
+            uri_path.push('/');
+            uri_path.push_str(&uri_encode_segment(bucket));
+        }
+        if let Some(k) = key {
+            uri_path.push('/');
+            uri_path.push_str(&uri_encode_path(k));
+        }
+    } else {
+        return Err("only --path-style aliases are supported in this build".to_string());
+    }
+    if uri_path.is_empty() {
+        uri_path = "/".to_string();
+    }
+
+    let payload_hash = payload_hash(upload_file)?;
+    let sign = sign_v4(
+        method,
+        &uri_path,
+        query,
+        &endpoint.host,
+        &alias.region,
+        &alias.access_key,
+        &alias.secret_key,
+        &payload_hash,
+    )?;
+
+    let mut url = format!("{}://{}{}", endpoint.scheme, endpoint.host, uri_path);
+    if !query.is_empty() {
+        url.push('?');
+        url.push_str(query);
+    }
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let body_path = env::temp_dir().join(format!("s4-body-{}-{}", std::process::id(), ts));
+
+    let mut cmd = Command::new("curl");
+    apply_curl_global_flags(&mut cmd, upload_file.is_some(), true);
+    cmd.arg("-sS")
+        .arg("-X")
+        .arg(method)
+        .arg(&url)
+        .arg("-H")
+        .arg(format!("Host: {}", endpoint.host))
+        .arg("-H")
+        .arg(format!("x-amz-date: {}", sign.amz_date))
+        .arg("-H")
+        .arg(format!("x-amz-content-sha256: {}", payload_hash))
+        .arg("-H")
+        .arg(format!("Authorization: {}", sign.authorization));
+    for header in extra_headers {
+        cmd.arg("-H").arg(header);
+    }
+    if let Some(file) = upload_file {
+        cmd.arg("--data-binary").arg(format!("@{}", file.display()));
+    }
+    cmd.arg("-o")
+        .arg(&body_path)
+        .arg("-w")
+        .arg("HTTPSTATUS:%{http_code}");
+
+    if debug {
+        eprintln!("[debug] request(bytes): {} {}", method, url);
+    }
+
+    let out = cmd.output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        let _ = fs::remove_file(&body_path);
+        return Err(format!(
+            "request execution failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+
+    let status_text = String::from_utf8_lossy(&out.stdout).to_string();
+    let status = status_text.trim().strip_prefix("HTTPSTATUS:").unwrap_or("");
+    let body = fs::read(&body_path).map_err(|e| e.to_string())?;
+    let _ = fs::remove_file(&body_path);
+
+    if !status.starts_with('2') {
+        return Err(format!("request failed with status {}", status));
+    }
+    Ok(body)
+}
+
+fn parse_event_stream_records(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i + 16 <= data.len() {
+        let total_len =
+            u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]) as usize;
+        let headers_len =
+            u32::from_be_bytes([data[i + 4], data[i + 5], data[i + 6], data[i + 7]]) as usize;
+        if total_len == 0 || i + total_len > data.len() || 12 + headers_len + 4 > total_len {
+            break;
+        }
+        let headers_start = i + 12;
+        let payload_start = headers_start + headers_len;
+        let payload_end = i + total_len - 4;
+        if payload_start > payload_end || payload_end > data.len() {
+            break;
+        }
+        let headers = &data[headers_start..payload_start];
+        let payload = &data[payload_start..payload_end];
+
+        let mut event_type: Option<String> = None;
+        let mut j = 0usize;
+        while j < headers.len() {
+            if j + 2 > headers.len() {
+                break;
+            }
+            let nlen = headers[j] as usize;
+            j += 1;
+            if j + nlen + 1 > headers.len() {
+                break;
+            }
+            let name = String::from_utf8_lossy(&headers[j..j + nlen]).to_string();
+            j += nlen;
+            let htype = headers[j];
+            j += 1;
+            match htype {
+                7 => {
+                    if j + 2 > headers.len() {
+                        break;
+                    }
+                    let slen = u16::from_be_bytes([headers[j], headers[j + 1]]) as usize;
+                    j += 2;
+                    if j + slen > headers.len() {
+                        break;
+                    }
+                    let val = String::from_utf8_lossy(&headers[j..j + slen]).to_string();
+                    j += slen;
+                    if name == ":event-type" {
+                        event_type = Some(val);
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        if matches!(event_type.as_deref(), Some("Records")) {
+            out.extend_from_slice(payload);
+        }
+        i += total_len;
+    }
+    if out.is_empty() {
+        out.extend_from_slice(data);
+    }
+    out
+}
+
+fn cmd_sql(
+    config: &AppConfig,
+    opts: &SqlOptions,
+    targets: &[S3Target],
+    json: bool,
+    debug: bool,
+) -> Result<(), String> {
+    let request_xml = build_select_request_xml(opts);
+    let temp_xml = env::temp_dir().join(format!("s4-sql-{}-req.xml", std::process::id()));
+    fs::write(&temp_xml, request_xml).map_err(|e| e.to_string())?;
+
+    for target in targets {
+        let alias = config
+            .aliases
+            .get(&target.alias)
+            .ok_or_else(|| format!("unknown alias: {}", target.alias))?;
+        let bucket = req_bucket(target, "sql")?;
+
+        let keys: Vec<String> = if opts.recursive {
+            let prefix = target.key.clone().unwrap_or_default();
+            list_object_keys(alias, &bucket, &prefix, debug)?
+        } else {
+            vec![req_key(target, "sql")?]
+        };
+
+        for key in keys {
+            let body = s3_request_bytes_with_headers(
+                alias,
+                "POST",
+                &bucket,
+                Some(&key),
+                "select&select-type=2",
+                Some(&temp_xml),
+                &[],
+                debug,
+            )?;
+            let records = parse_event_stream_records(&body);
+            if json {
+                println!(
+                    "{{\"bucket\":\"{}\",\"key\":\"{}\",\"records\":\"{}\"}}",
+                    escape_json(&bucket),
+                    escape_json(&key),
+                    escape_json(&String::from_utf8_lossy(&records))
+                );
+            } else {
+                print!("{}", String::from_utf8_lossy(&records));
+            }
+        }
+    }
+
+    let _ = fs::remove_file(&temp_xml);
     Ok(())
 }
 
@@ -2891,6 +3321,7 @@ COMMANDS:
   rb         remove bucket
   legalhold  manage legal hold for object(s) (set/clear/info)
   retention  manage retention for object(s) (set/clear/info)
+  sql        run SQL queries on objects
   replicate  manage server-side bucket replication [placeholder]
   put        upload object
   get        download object
@@ -2936,11 +3367,12 @@ mod tests {
     use super::{
         AliasConfig, AppConfig, CorsCommand, EncryptCommand, EventCommand, IdpKind, IlmKind,
         LegalHoldCommand, ReplicateSubcommand, RetentionCommand, build_complete_multipart_xml,
-        extract_tag_values, is_excluded, looks_ready_xml, parse_config, parse_cors_args,
-        parse_encrypt_args, parse_event_args, parse_globals, parse_human_duration, parse_idp_args,
-        parse_ilm_args, parse_legalhold_args, parse_replicate_args, parse_retention_args,
-        parse_sync_args, parse_target, serialize_config, sync_destination_key, uri_encode_path,
-        uri_encode_query_component, wildcard_match, xml_unescape,
+        build_select_request_xml, extract_tag_values, is_excluded, looks_ready_xml, parse_config,
+        parse_cors_args, parse_encrypt_args, parse_event_args, parse_event_stream_records,
+        parse_globals, parse_human_duration, parse_idp_args, parse_ilm_args, parse_legalhold_args,
+        parse_replicate_args, parse_retention_args, parse_sql_args, parse_sync_args, parse_target,
+        serialize_config, sync_destination_key, uri_encode_path, uri_encode_query_component,
+        wildcard_match, xml_unescape,
     };
     use std::collections::BTreeMap;
 
@@ -3344,6 +3776,93 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parse_sql_args_defaults_and_targets() {
+        let args = vec!["sql".to_string(), "a/bucket/path.csv".to_string()];
+        let (opts, targets) = parse_sql_args(&args).expect("sql args should parse");
+        assert_eq!(opts.query, "select * from S3Object");
+        assert!(!opts.recursive);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].alias, "a");
+        assert_eq!(targets[0].bucket.as_deref(), Some("bucket"));
+        assert_eq!(targets[0].key.as_deref(), Some("path.csv"));
+    }
+
+    #[test]
+    fn parse_sql_args_full_flags() {
+        let args = vec![
+            "sql".to_string(),
+            "--query".to_string(),
+            "select count(*) from S3Object".to_string(),
+            "-r".to_string(),
+            "--csv-input".to_string(),
+            "fh=USE,fd=;".to_string(),
+            "--compression".to_string(),
+            "GZIP".to_string(),
+            "--csv-output".to_string(),
+            "fd=;".to_string(),
+            "--csv-output-header".to_string(),
+            "c1,c2".to_string(),
+            "--enc-c".to_string(),
+            "a/bucket=Zm9v".to_string(),
+            "a/bucket/prefix".to_string(),
+        ];
+        let (opts, targets) = parse_sql_args(&args).expect("sql args should parse");
+        assert_eq!(opts.query, "select count(*) from S3Object");
+        assert!(opts.recursive);
+        assert_eq!(opts.csv_input.as_deref(), Some("fh=USE,fd=;"));
+        assert_eq!(opts.compression.as_deref(), Some("GZIP"));
+        assert_eq!(opts.csv_output.as_deref(), Some("fd=;"));
+        assert_eq!(opts.csv_output_header.as_deref(), Some("c1,c2"));
+        assert_eq!(opts.enc_c, vec!["a/bucket=Zm9v".to_string()]);
+        assert_eq!(targets[0].key.as_deref(), Some("prefix"));
+    }
+
+    #[test]
+    fn build_select_request_xml_contains_query_and_serialization() {
+        let args = vec![
+            "sql".to_string(),
+            "--query".to_string(),
+            "select * from S3Object".to_string(),
+            "--json-output".to_string(),
+            "rd=\n".to_string(),
+            "a/b/k".to_string(),
+        ];
+        let (opts, _) = parse_sql_args(&args).expect("sql args should parse");
+        let xml = build_select_request_xml(&opts);
+        assert!(xml.contains("<Expression>select * from S3Object</Expression>"));
+        assert!(xml.contains("<ExpressionType>SQL</ExpressionType>"));
+        assert!(xml.contains("<JSON>"));
+    }
+
+    #[test]
+    fn parse_event_stream_records_returns_payload_for_records_event() {
+        fn mk_header(name: &str, value: &str) -> Vec<u8> {
+            let mut h = Vec::new();
+            h.push(name.len() as u8);
+            h.extend_from_slice(name.as_bytes());
+            h.push(7);
+            h.extend_from_slice(&(value.len() as u16).to_be_bytes());
+            h.extend_from_slice(value.as_bytes());
+            h
+        }
+        let payload = b"row1,row2\n";
+        let mut headers = Vec::new();
+        headers.extend_from_slice(&mk_header(":message-type", "event"));
+        headers.extend_from_slice(&mk_header(":event-type", "Records"));
+
+        let total_len = 12 + headers.len() + payload.len() + 4;
+        let mut msg = Vec::new();
+        msg.extend_from_slice(&(total_len as u32).to_be_bytes());
+        msg.extend_from_slice(&(headers.len() as u32).to_be_bytes());
+        msg.extend_from_slice(&[0, 0, 0, 0]);
+        msg.extend_from_slice(&headers);
+        msg.extend_from_slice(payload);
+        msg.extend_from_slice(&[0, 0, 0, 0]);
+
+        let out = parse_event_stream_records(&msg);
+        assert_eq!(out, payload);
+    }
     #[test]
     fn parse_globals_extended_flags() {
         let (opts, rest) = parse_globals(vec![
