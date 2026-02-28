@@ -73,6 +73,17 @@ target/debug/s4 -C "$CFG_DIR" mv "ci/$DST_BUCKET/cp/copied.txt" "ci/$DST_BUCKET/
 target/debug/s4 -C "$CFG_DIR" rm "ci/$SRC_BUCKET/cp/local.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/cp/moved.txt"
 
+
+# pipe coverage
+PIPE_EXPECT="$WORKDIR/pipe-expected.txt"
+PIPE_GOT="$WORKDIR/pipe-got.txt"
+printf 'pipe-check-%s
+' "$TS" > "$PIPE_EXPECT"
+cat "$PIPE_EXPECT" | target/debug/s4 -C "$CFG_DIR" pipe "ci/$SRC_BUCKET/pipe/stdin.txt"
+target/debug/s4 -C "$CFG_DIR" get "ci/$SRC_BUCKET/pipe/stdin.txt" "$PIPE_GOT"
+cmp -s "$PIPE_EXPECT" "$PIPE_GOT"
+target/debug/s4 -C "$CFG_DIR" rm "ci/$SRC_BUCKET/pipe/stdin.txt"
+
 target/debug/s4 -C "$CFG_DIR" rm "ci/$SRC_BUCKET/photos/2024/a.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$SRC_BUCKET/photos/2024/b.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/sync-copy/2024/a.txt"

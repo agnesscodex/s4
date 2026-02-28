@@ -4,6 +4,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
 struct AliasConfig {
@@ -90,7 +91,7 @@ fn run() -> Result<(), String> {
     match rest[0].as_str() {
         "alias" => handle_alias(&rest[1..], &mut config, &config_path, opts.json),
         "ls" | "mb" | "rb" | "put" | "get" | "rm" | "stat" | "cat" | "sync" | "mirror" | "cp"
-        | "mv" | "find" | "tree" | "head" => {
+        | "mv" | "find" | "tree" | "head" | "pipe" => {
             handle_s3_command(&rest, &config, opts.json, opts.debug)
         }
         _ => Err(format!("unknown command: {}", rest[0])),
@@ -251,6 +252,7 @@ fn handle_s3_command(
         && command != "find"
         && command != "tree"
         && command != "head"
+        && command != "pipe"
         && args.len() <= target_idx
     {
         return Err(format!("usage: s4 {command} ..."));
@@ -312,6 +314,20 @@ fn handle_s3_command(
             .transpose()?
             .unwrap_or(10);
         return cmd_head(alias, &bucket, &key, lines, debug);
+    }
+
+    if command == "pipe" {
+        if args.len() < 2 {
+            return Err("usage: s4 pipe <alias/bucket/key>".to_string());
+        }
+        let target = parse_target(&args[1])?;
+        let alias = config
+            .aliases
+            .get(&target.alias)
+            .ok_or_else(|| format!("unknown alias: {}", target.alias))?;
+        let bucket = req_bucket(&target, "pipe")?;
+        let key = req_key(&target, "pipe")?;
+        return cmd_pipe(alias, &bucket, &key, json, debug);
     }
 
     if command == "sync" || command == "mirror" {
@@ -455,7 +471,7 @@ fn handle_s3_command(
             Ok(())
         }
         "sync" | "mirror" => unreachable!(),
-        "cp" | "mv" | "find" | "tree" | "head" => unreachable!(),
+        "cp" | "mv" | "find" | "tree" | "head" | "pipe" => unreachable!(),
         _ => Err(format!("unsupported command: {command}")),
     }
 }
@@ -733,6 +749,50 @@ fn cmd_head(
     let body = s3_request(alias, "GET", bucket, Some(key), "", None, None, debug)?;
     for line in body.lines().take(lines) {
         println!("{}", line);
+    }
+    Ok(())
+}
+
+fn cmd_pipe(
+    alias: &AliasConfig,
+    bucket: &str,
+    key: &str,
+    json: bool,
+    debug: bool,
+) -> Result<(), String> {
+    let mut stdin_bytes = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut stdin_bytes)
+        .map_err(|e| e.to_string())?;
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let temp_path = env::temp_dir().join(format!("s4-pipe-{}-{}", std::process::id(), ts));
+    fs::write(&temp_path, &stdin_bytes).map_err(|e| e.to_string())?;
+
+    let upload_result = s3_request(
+        alias,
+        "PUT",
+        bucket,
+        Some(key),
+        "",
+        Some(&temp_path),
+        None,
+        debug,
+    );
+    let _ = fs::remove_file(&temp_path);
+    upload_result?;
+
+    if json {
+        println!(
+            "{{\"uploaded\":{{\"bucket\":\"{}\",\"key\":\"{}\",\"source\":\"stdin\"}}}}",
+            escape_json(bucket),
+            escape_json(key)
+        );
+    } else {
+        println!("Uploaded STDIN to '{}/{}'", bucket, key);
     }
     Ok(())
 }
@@ -1254,6 +1314,7 @@ COMMANDS:
   find       find objects in bucket/prefix
   tree       show object tree in bucket/prefix
   head       print first N lines from object
+  pipe       upload stdin stream to object
   version    print version
 
 FLAGS:
