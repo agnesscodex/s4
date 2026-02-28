@@ -1690,9 +1690,9 @@ fn s3_request_bytes_with_headers(
     )?;
 
     let mut url = format!("{}://{}{}", endpoint.scheme, endpoint.host, uri_path);
-    if !canonical_query.is_empty() {
+    if !query.is_empty() {
         url.push('?');
-        url.push_str(&canonical_query);
+        url.push_str(query);
     }
 
     let ts = SystemTime::now()
@@ -2755,9 +2755,9 @@ fn s3_request_with_headers(
     )?;
 
     let mut url = format!("{}://{}{}", endpoint.scheme, endpoint.host, uri_path);
-    if !canonical_query.is_empty() {
+    if !query.is_empty() {
         url.push('?');
-        url.push_str(&canonical_query);
+        url.push_str(query);
     }
 
     let mut cmd = Command::new("curl");
