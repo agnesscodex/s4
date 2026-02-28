@@ -5,6 +5,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
@@ -27,6 +28,10 @@ struct GlobalOpts {
     json: bool,
     debug: bool,
     insecure: bool,
+    resolve: Vec<String>,
+    limit_upload: Option<String>,
+    limit_download: Option<String>,
+    custom_headers: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -50,6 +55,20 @@ struct SignatureParts {
 }
 
 static CURL_INSECURE: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Default, Clone)]
+struct CurlGlobalOpts {
+    resolve: Vec<String>,
+    limit_upload: Option<String>,
+    limit_download: Option<String>,
+    custom_headers: Vec<String>,
+}
+
+static CURL_GLOBAL_OPTS: OnceLock<Mutex<CurlGlobalOpts>> = OnceLock::new();
+
+fn curl_global_opts() -> &'static Mutex<CurlGlobalOpts> {
+    CURL_GLOBAL_OPTS.get_or_init(|| Mutex::new(CurlGlobalOpts::default()))
+}
 
 fn main() {
     if let Err(err) = run() {
@@ -91,6 +110,13 @@ fn run() -> Result<(), String> {
         // Propagate to all curl invocations (including multipart paths).
         CURL_INSECURE.store(true, Ordering::Relaxed);
     }
+    {
+        let mut curl_opts = curl_global_opts().lock().map_err(|e| e.to_string())?;
+        curl_opts.resolve = opts.resolve.clone();
+        curl_opts.limit_upload = opts.limit_upload.clone();
+        curl_opts.limit_download = opts.limit_download.clone();
+        curl_opts.custom_headers = opts.custom_headers.clone();
+    }
 
     match rest[0].as_str() {
         "alias" => handle_alias(&rest[1..], &mut config, &config_path, opts.json),
@@ -125,6 +151,26 @@ fn parse_globals(args: Vec<String>) -> Result<(GlobalOpts, Vec<String>), String>
             "--insecure" => {
                 opts.insecure = true;
                 i += 1;
+            }
+            "--resolve" => {
+                let value = args.get(i + 1).ok_or("--resolve expects a value")?;
+                opts.resolve.push(value.to_string());
+                i += 2;
+            }
+            "--limit-upload" => {
+                let value = args.get(i + 1).ok_or("--limit-upload expects a value")?;
+                opts.limit_upload = Some(value.to_string());
+                i += 2;
+            }
+            "--limit-download" => {
+                let value = args.get(i + 1).ok_or("--limit-download expects a value")?;
+                opts.limit_download = Some(value.to_string());
+                i += 2;
+            }
+            "--custom-header" | "-H" => {
+                let value = args.get(i + 1).ok_or("--custom-header expects a value")?;
+                opts.custom_headers.push(value.to_string());
+                i += 2;
             }
             "--help" | "-h" | "--version" | "-v" => {
                 rest.extend_from_slice(&args[i..]);
@@ -996,9 +1042,26 @@ fn s3_request(
     )
 }
 
-fn apply_curl_global_flags(cmd: &mut Command) {
+fn apply_curl_global_flags(cmd: &mut Command, is_upload: bool, is_download: bool) {
     if CURL_INSECURE.load(Ordering::Relaxed) {
         cmd.arg("-k");
+    }
+    if let Ok(opts) = curl_global_opts().lock() {
+        for resolve in &opts.resolve {
+            cmd.arg("--resolve").arg(resolve);
+        }
+        if is_upload {
+            if let Some(limit_upload) = &opts.limit_upload {
+                cmd.arg("--limit-rate").arg(limit_upload);
+            }
+        } else if is_download {
+            if let Some(limit_download) = &opts.limit_download {
+                cmd.arg("--limit-rate").arg(limit_download);
+            }
+        }
+        for header in &opts.custom_headers {
+            cmd.arg("-H").arg(header);
+        }
     }
 }
 
@@ -1052,7 +1115,7 @@ fn s3_request_with_headers(
     }
 
     let mut cmd = Command::new("curl");
-    apply_curl_global_flags(&mut cmd);
+    apply_curl_global_flags(&mut cmd, upload_file.is_some(), output_file.is_some());
     cmd.arg("-sS").arg(&url);
     if method != "HEAD" {
         cmd.arg("-X").arg(method);
@@ -1359,7 +1422,7 @@ fn upload_part(
         endpoint.scheme, endpoint.host, uri_path, query
     );
     let mut cmd = Command::new("curl");
-    apply_curl_global_flags(&mut cmd);
+    apply_curl_global_flags(&mut cmd, true, false);
     cmd.arg("-sS")
         .arg("-X")
         .arg("PUT")
@@ -1653,6 +1716,10 @@ FLAGS:
   --json
   --debug
   --insecure
+  --resolve <HOST:PORT=IP>
+  --limit-upload <RATE>
+  --limit-download <RATE>
+  -H, --custom-header <KEY:VALUE>
   -h, --help
   -v, --version"
     );
@@ -1751,14 +1818,31 @@ mod tests {
     }
 
     #[test]
-    fn parse_globals_insecure_flag() {
+    fn parse_globals_extended_flags() {
         let (opts, rest) = parse_globals(vec![
             "--insecure".to_string(),
+            "--resolve".to_string(),
+            "minio.local:9000=127.0.0.1".to_string(),
+            "--limit-upload".to_string(),
+            "1M".to_string(),
+            "--limit-download".to_string(),
+            "2M".to_string(),
+            "-H".to_string(),
+            "x-test: one".to_string(),
+            "--custom-header".to_string(),
+            "x-test2: two".to_string(),
             "ls".to_string(),
             "a/b".to_string(),
         ])
         .expect("parse globals should succeed");
         assert!(opts.insecure);
+        assert_eq!(opts.resolve, vec!["minio.local:9000=127.0.0.1".to_string()]);
+        assert_eq!(opts.limit_upload.as_deref(), Some("1M"));
+        assert_eq!(opts.limit_download.as_deref(), Some("2M"));
+        assert_eq!(
+            opts.custom_headers,
+            vec!["x-test: one".to_string(), "x-test2: two".to_string()]
+        );
         assert_eq!(rest, vec!["ls".to_string(), "a/b".to_string()]);
     }
 }

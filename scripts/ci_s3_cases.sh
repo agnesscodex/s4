@@ -36,6 +36,18 @@ target/debug/s4 -C "$CFG_DIR" alias set ci "$S4_E2E_ENDPOINT" "$S4_E2E_ACCESS_KE
 target/debug/s4 -C "$CFG_DIR" mb "ci/$SRC_BUCKET"
 target/debug/s4 -C "$CFG_DIR" mb "ci/$DST_BUCKET"
 
+# global flags coverage: resolve/custom header/limits
+EP_HOSTPORT="${S4_E2E_ENDPOINT#http://}"
+EP_HOSTPORT="${EP_HOSTPORT#https://}"
+if [[ "$EP_HOSTPORT" == *":"* ]]; then
+  EP_HOST="${EP_HOSTPORT%%:*}"
+  EP_PORT="${EP_HOSTPORT##*:}"
+else
+  EP_HOST="$EP_HOSTPORT"
+  EP_PORT="80"
+fi
+
+target/debug/s4 -C "$CFG_DIR"   --resolve "${EP_HOST}:${EP_PORT}=${EP_HOST}"   --limit-download "1G"   --custom-header "x-s4-ci: globals"   ls ci > "$WORKDIR/globals-ls.out"
 
 # ping/ready coverage
 target/debug/s4 -C "$CFG_DIR" ping ci > "$WORKDIR/ping.out"

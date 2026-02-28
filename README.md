@@ -4,7 +4,7 @@
 
 ## Что реализовано
 
-- Глобальные флаги: `-C/--config-dir`, `--json`, `--debug`, `--insecure`.
+- Глобальные флаги: `-C/--config-dir`, `--json`, `--debug`, `--insecure`, `--resolve`, `--limit-upload`, `--limit-download`, `--custom-header/-H`.
 - Управление alias: `alias set|ls|rm`.
 - S3-команды: `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `sync`, `mirror` (alias к `sync`), `cp`, `mv`, `find`, `tree`, `head`, `pipe`, `ping`, `ready`.
 - AWS SigV4 подпись запросов реализована через встроенный Python helper (`python3`) и HTTP-вызовы через `curl`.
@@ -50,6 +50,9 @@ s4 ready local
 ```
 
 
+
+
+> Примечание по лимитам: `--limit-upload` и `--limit-download` в текущей реализации передаются в `curl` как `--limit-rate` для upload/download-запросов соответственно.
 ## Автоматизированный e2e
 
 Для полного smoke/e2e прогона добавлен скрипт `scripts/e2e.sh`.
@@ -121,6 +124,6 @@ GITHUB_TOKEN=... ./scripts/monitor_ci.sh --wait --rerun-failed --sha "$(git rev-
 
 ## Флаги: что есть и чего пока нет
 
-Сейчас поддерживаются глобальные флаги: `-C/--config-dir`, `--json`, `--debug`, `--insecure`, `-h/--help`, `-v/--version`.
+Сейчас поддерживаются глобальные флаги: `-C/--config-dir`, `--json`, `--debug`, `--insecure`, `--resolve`, `--limit-upload`, `--limit-download`, `--custom-header/-H`, `-h/--help`, `-v/--version`.
 
-Флаги из `mc`, которые пока не реализованы: `--resolve`, `--limit-upload`, `--limit-download`, `--custom-header/-H`, `--quiet`, `--disable-pager`, `--no-color`, `--autocompletion` и другие.
+Флаги из `mc`, которые пока не реализованы: `--quiet`, `--disable-pager`, `--no-color`, `--autocompletion` и другие.
