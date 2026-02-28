@@ -54,6 +54,23 @@ target/debug/s4 -C "$CFG_DIR" cors get "ci/$SRC_BUCKET" > "$WORKDIR/cors-get.out
 rg -q "CORSConfiguration|CORSRule" "$WORKDIR/cors-get.out"
 target/debug/s4 -C "$CFG_DIR" cors remove "ci/$SRC_BUCKET"
 
+# encrypt coverage
+ENC_XML="$WORKDIR/encryption.xml"
+cat > "$ENC_XML" <<'EOF'
+<ServerSideEncryptionConfiguration>
+  <Rule>
+    <ApplyServerSideEncryptionByDefault>
+      <SSEAlgorithm>AES256</SSEAlgorithm>
+    </ApplyServerSideEncryptionByDefault>
+  </Rule>
+</ServerSideEncryptionConfiguration>
+EOF
+
+target/debug/s4 -C "$CFG_DIR" encrypt set "ci/$SRC_BUCKET" "$ENC_XML"
+target/debug/s4 -C "$CFG_DIR" encrypt info "ci/$SRC_BUCKET" > "$WORKDIR/encrypt-info.out"
+rg -q "ServerSideEncryptionConfiguration|SSEAlgorithm" "$WORKDIR/encrypt-info.out"
+target/debug/s4 -C "$CFG_DIR" encrypt clear "ci/$SRC_BUCKET"
+
 # global flags coverage: resolve/custom header/limits
 EP_HOSTPORT="${S4_E2E_ENDPOINT#http://}"
 EP_HOSTPORT="${EP_HOSTPORT#https://}"
