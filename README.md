@@ -6,7 +6,7 @@
 
 - Глобальные флаги: `-C/--config-dir`, `--json`, `--debug`, `--insecure`, `--resolve`, `--limit-upload`, `--limit-download`, `--custom-header/-H`.
 - Управление alias: `alias set|ls|rm`.
-- S3-команды: `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `cors`, `encrypt`, `sync`, `mirror` (alias к `sync`), `cp`, `mv`, `find`, `tree`, `head`, `pipe`, `ping`, `ready`.
+- S3-команды: `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `cors`, `encrypt`, `event`, `sync`, `mirror` (alias к `sync`), `cp`, `mv`, `find`, `tree`, `head`, `pipe`, `ping`, `ready`.
 - AWS SigV4 подпись запросов реализована через встроенный Python helper (`python3`) и HTTP-вызовы через `curl`.
 - Для больших upload-ов (более 16 MiB) реализован multipart upload (`put`, `cp` local->s3, `sync/mirror`, `pipe`).
 - Формат конфига: `~/.s4/config.toml`.
@@ -33,6 +33,11 @@ s4 cors remove local/test-bucket
 s4 encrypt set local/test-bucket ./encryption.xml
 s4 encrypt info local/test-bucket
 s4 encrypt clear local/test-bucket
+
+# events
+s4 event add local/test-bucket ./notification.xml
+s4 event ls local/test-bucket
+s4 event rm local/test-bucket --force
 
 s4 rm local/test-bucket/hello.txt
 s4 rb local/test-bucket

@@ -68,6 +68,13 @@ enum EncryptCommand {
 }
 
 #[derive(Debug)]
+enum EventCommand {
+    Add { target: S3Target, file: PathBuf },
+    Remove { target: S3Target, force: bool },
+    List { target: S3Target },
+}
+
+#[derive(Debug)]
 struct Endpoint {
     scheme: String,
     host: String,
@@ -147,9 +154,8 @@ fn run() -> Result<(), String> {
     match rest[0].as_str() {
         "alias" => handle_alias(&rest[1..], &mut config, &config_path, opts.json),
         "ls" | "mb" | "rb" | "put" | "get" | "rm" | "stat" | "cat" | "sync" | "mirror" | "cp"
-        | "mv" | "find" | "tree" | "head" | "pipe" | "ping" | "ready" | "cors" | "encrypt" => {
-            handle_s3_command(&rest, &config, opts.json, opts.debug)
-        }
+        | "mv" | "find" | "tree" | "head" | "pipe" | "ping" | "ready" | "cors" | "encrypt"
+        | "event" => handle_s3_command(&rest, &config, opts.json, opts.debug),
         _ => Err(format!("unknown command: {}", rest[0])),
     }
 }
@@ -333,6 +339,7 @@ fn handle_s3_command(
         && command != "ready"
         && command != "cors"
         && command != "encrypt"
+        && command != "event"
         && args.len() <= target_idx
     {
         return Err(format!("usage: s4 {command} ..."));
@@ -442,6 +449,11 @@ fn handle_s3_command(
     if command == "encrypt" {
         let encrypt_cmd = parse_encrypt_args(args)?;
         return cmd_encrypt(config, encrypt_cmd, json, debug);
+    }
+
+    if command == "event" {
+        let event_cmd = parse_event_args(args)?;
+        return cmd_event(config, event_cmd, json, debug);
     }
 
     if command == "sync" || command == "mirror" {
@@ -569,7 +581,8 @@ fn handle_s3_command(
             Ok(())
         }
         "sync" | "mirror" => unreachable!(),
-        "cp" | "mv" | "find" | "tree" | "head" | "pipe" | "ping" | "ready" | "cors" | "encrypt" => {
+        "cp" | "mv" | "find" | "tree" | "head" | "pipe" | "ping" | "ready" | "cors" | "encrypt"
+        | "event" => {
             unreachable!()
         }
         _ => Err(format!("unsupported command: {command}")),
@@ -771,6 +784,126 @@ fn cmd_encrypt(
             if json {
                 println!(
                     "{{\"bucket\":\"{}\",\"encryption\":\"{}\"}}",
+                    escape_json(&bucket),
+                    escape_json(&body)
+                );
+            } else {
+                print!("{}", body);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn parse_event_args(args: &[String]) -> Result<EventCommand, String> {
+    if args.len() < 3 {
+        return Err("usage: s4 event <add|remove|rm|list|ls> ...".to_string());
+    }
+    match args[1].as_str() {
+        "add" => {
+            if args.len() < 4 {
+                return Err(
+                    "usage: s4 event add <alias/bucket> <notification_xml_file>".to_string()
+                );
+            }
+            let target = parse_target(&args[2])?;
+            let file = PathBuf::from(&args[3]);
+            Ok(EventCommand::Add { target, file })
+        }
+        "remove" | "rm" => {
+            let target = parse_target(&args[2])?;
+            let force = args.iter().any(|a| a == "--force");
+            Ok(EventCommand::Remove { target, force })
+        }
+        "list" | "ls" => {
+            let target = parse_target(&args[2])?;
+            Ok(EventCommand::List { target })
+        }
+        "help" | "h" => Err("usage: s4 event <add|remove|rm|list|ls> ...".to_string()),
+        other => Err(format!("unknown event subcommand: {other}")),
+    }
+}
+
+fn cmd_event(config: &AppConfig, cmd: EventCommand, json: bool, debug: bool) -> Result<(), String> {
+    match cmd {
+        EventCommand::Add { target, file } => {
+            if !file.exists() {
+                return Err(format!("notification file not found: {}", file.display()));
+            }
+            let alias = config
+                .aliases
+                .get(&target.alias)
+                .ok_or_else(|| format!("unknown alias: {}", target.alias))?;
+            let bucket = req_bucket(&target, "event add")?;
+            s3_request(
+                alias,
+                "PUT",
+                &bucket,
+                None,
+                "notification",
+                Some(&file),
+                None,
+                debug,
+            )?;
+            if json {
+                println!(
+                    "{{\"status\":\"ok\",\"command\":\"event add\",\"bucket\":\"{}\"}}",
+                    escape_json(&bucket)
+                );
+            } else {
+                println!("Notification config set for bucket '{}'", bucket);
+            }
+            Ok(())
+        }
+        EventCommand::Remove { target, force } => {
+            let alias = config
+                .aliases
+                .get(&target.alias)
+                .ok_or_else(|| format!("unknown alias: {}", target.alias))?;
+            let bucket = req_bucket(&target, "event remove")?;
+            s3_request(
+                alias,
+                "PUT",
+                &bucket,
+                None,
+                "notification",
+                None,
+                None,
+                debug,
+            )?;
+            if json {
+                println!(
+                    "{{\"status\":\"ok\",\"command\":\"event remove\",\"bucket\":\"{}\",\"force\":{}}}",
+                    escape_json(&bucket),
+                    force
+                );
+            } else {
+                println!(
+                    "Notification config removed for bucket '{}' (force: {})",
+                    bucket, force
+                );
+            }
+            Ok(())
+        }
+        EventCommand::List { target } => {
+            let alias = config
+                .aliases
+                .get(&target.alias)
+                .ok_or_else(|| format!("unknown alias: {}", target.alias))?;
+            let bucket = req_bucket(&target, "event list")?;
+            let body = s3_request(
+                alias,
+                "GET",
+                &bucket,
+                None,
+                "notification",
+                None,
+                None,
+                debug,
+            )?;
+            if json {
+                println!(
+                    "{{\"bucket\":\"{}\",\"notification\":\"{}\"}}",
                     escape_json(&bucket),
                     escape_json(&body)
                 );
@@ -2239,6 +2372,7 @@ COMMANDS:
   cat        print object content
   cors       manage bucket CORS configuration (set/get/remove)
   encrypt    manage bucket encryption config (set/clear/info)
+  event      manage bucket notifications (add/remove/list)
   sync       sync objects from source bucket/prefix to destination
   mirror     alias for sync (mc-compatible naming)
   cp         copy object(s) between local and S3
@@ -2268,11 +2402,12 @@ FLAGS:
 #[cfg(test)]
 mod tests {
     use super::{
-        AliasConfig, AppConfig, CorsCommand, EncryptCommand, build_complete_multipart_xml,
-        extract_tag_values, is_excluded, looks_ready_xml, parse_config, parse_cors_args,
-        parse_encrypt_args, parse_globals, parse_human_duration, parse_sync_args, parse_target,
-        serialize_config, sync_destination_key, uri_encode_path, uri_encode_query_component,
-        wildcard_match, xml_unescape,
+        AliasConfig, AppConfig, CorsCommand, EncryptCommand, EventCommand,
+        build_complete_multipart_xml, extract_tag_values, is_excluded, looks_ready_xml,
+        parse_config, parse_cors_args, parse_encrypt_args, parse_event_args, parse_globals,
+        parse_human_duration, parse_sync_args, parse_target, serialize_config,
+        sync_destination_key, uri_encode_path, uri_encode_query_component, wildcard_match,
+        xml_unescape,
     };
     use std::collections::BTreeMap;
 
@@ -2486,6 +2621,44 @@ mod tests {
                 assert_eq!(target.bucket.as_deref(), Some("bucket"));
             }
             _ => panic!("expected encrypt info"),
+        }
+    }
+
+    #[test]
+    fn parse_event_args_add_works() {
+        let args = vec![
+            "event".to_string(),
+            "add".to_string(),
+            "a/bucket".to_string(),
+            "event.xml".to_string(),
+        ];
+        let parsed = parse_event_args(&args).expect("event args should parse");
+        match parsed {
+            EventCommand::Add { target, file } => {
+                assert_eq!(target.alias, "a");
+                assert_eq!(target.bucket.as_deref(), Some("bucket"));
+                assert_eq!(file.to_string_lossy(), "event.xml");
+            }
+            _ => panic!("expected event add"),
+        }
+    }
+
+    #[test]
+    fn parse_event_args_remove_force_works() {
+        let args = vec![
+            "event".to_string(),
+            "rm".to_string(),
+            "a/bucket".to_string(),
+            "--force".to_string(),
+        ];
+        let parsed = parse_event_args(&args).expect("event args should parse");
+        match parsed {
+            EventCommand::Remove { target, force } => {
+                assert_eq!(target.alias, "a");
+                assert_eq!(target.bucket.as_deref(), Some("bucket"));
+                assert!(force);
+            }
+            _ => panic!("expected event remove"),
         }
     }
 

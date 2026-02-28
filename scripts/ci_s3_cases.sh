@@ -71,6 +71,23 @@ target/debug/s4 -C "$CFG_DIR" encrypt info "ci/$SRC_BUCKET" > "$WORKDIR/encrypt-
 rg -q "ServerSideEncryptionConfiguration|SSEAlgorithm" "$WORKDIR/encrypt-info.out"
 target/debug/s4 -C "$CFG_DIR" encrypt clear "ci/$SRC_BUCKET"
 
+# event coverage
+EVENT_XML="$WORKDIR/notification.xml"
+cat > "$EVENT_XML" <<'EOF'
+<NotificationConfiguration>
+  <QueueConfiguration>
+    <Id>s4-ci-event</Id>
+    <Event>s3:ObjectCreated:*</Event>
+    <Queue>arn:minio:sqs::1:webhook</Queue>
+  </QueueConfiguration>
+</NotificationConfiguration>
+EOF
+
+target/debug/s4 -C "$CFG_DIR" event add "ci/$SRC_BUCKET" "$EVENT_XML"
+target/debug/s4 -C "$CFG_DIR" event ls "ci/$SRC_BUCKET" > "$WORKDIR/event-list.out"
+rg -q "NotificationConfiguration|QueueConfiguration|Event" "$WORKDIR/event-list.out"
+target/debug/s4 -C "$CFG_DIR" event rm "ci/$SRC_BUCKET" --force
+
 # global flags coverage: resolve/custom header/limits
 EP_HOSTPORT="${S4_E2E_ENDPOINT#http://}"
 EP_HOSTPORT="${EP_HOSTPORT#https://}"
