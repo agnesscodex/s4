@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::thread::sleep;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
 struct AliasConfig {
@@ -46,6 +47,7 @@ struct SyncOptions {
     overwrite: bool,
     dry_run: bool,
     remove: bool,
+    watch: bool,
     excludes: Vec<String>,
     newer_than: Option<u64>,
     older_than: Option<u64>,
@@ -589,7 +591,8 @@ fn parse_sync_args(args: &[String]) -> Result<(SyncOptions, S3Target, S3Target),
                 i += 2;
             }
             "--watch" | "-w" => {
-                return Err("sync/mirror flag not implemented yet: --watch/-w".to_string());
+                opts.watch = true;
+                i += 1;
             }
             f if f.starts_with('-') => {
                 return Err(format!("sync/mirror flag not implemented yet: {f}"));
@@ -729,23 +732,23 @@ fn object_age_seconds(
     Ok(Some(age))
 }
 
-fn cmd_sync(
-    config: &AppConfig,
+fn watch_interval() -> Duration {
+    let seconds = env::var("S4_SYNC_WATCH_INTERVAL_SEC")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(2);
+    Duration::from_secs(seconds.max(1))
+}
+
+fn cmd_sync_once(
+    src_alias: &AliasConfig,
+    dst_alias: &AliasConfig,
     source: &S3Target,
     destination: &S3Target,
     options: &SyncOptions,
     json: bool,
     debug: bool,
-) -> Result<(), String> {
-    let src_alias = config
-        .aliases
-        .get(&source.alias)
-        .ok_or_else(|| format!("unknown alias: {}", source.alias))?;
-    let dst_alias = config
-        .aliases
-        .get(&destination.alias)
-        .ok_or_else(|| format!("unknown alias: {}", destination.alias))?;
-
+) -> Result<(usize, usize), String> {
     let src_bucket = req_bucket(source, "sync")?;
     let dst_bucket = req_bucket(destination, "sync")?;
     let src_prefix = source.key.clone().unwrap_or_default();
@@ -843,26 +846,68 @@ fn cmd_sync(
         }
     }
 
-    if json {
-        println!(
-            "{{\"status\":\"ok\",\"copied\":{},\"removed\":{},\"dry_run\":{},\"src\":\"{}\",\"dst\":\"{}\"}}",
-            copied,
-            removed,
-            options.dry_run,
-            escape_json(&format!("{}/{}", source.alias, src_bucket)),
-            escape_json(&format!("{}/{}", destination.alias, dst_bucket))
-        );
-    } else {
-        println!(
-            "Synced {} object(s) from {}/{} to {}/{} (removed: {}, dry-run: {})",
-            copied,
-            source.alias,
-            src_bucket,
-            destination.alias,
-            dst_bucket,
-            removed,
-            options.dry_run
-        );
+    Ok((copied, removed))
+}
+
+fn cmd_sync(
+    config: &AppConfig,
+    source: &S3Target,
+    destination: &S3Target,
+    options: &SyncOptions,
+    json: bool,
+    debug: bool,
+) -> Result<(), String> {
+    let src_alias = config
+        .aliases
+        .get(&source.alias)
+        .ok_or_else(|| format!("unknown alias: {}", source.alias))?;
+    let dst_alias = config
+        .aliases
+        .get(&destination.alias)
+        .ok_or_else(|| format!("unknown alias: {}", destination.alias))?;
+
+    loop {
+        let (copied, removed) = cmd_sync_once(
+            src_alias,
+            dst_alias,
+            source,
+            destination,
+            options,
+            json,
+            debug,
+        )?;
+
+        let src_bucket = req_bucket(source, "sync")?;
+        let dst_bucket = req_bucket(destination, "sync")?;
+
+        if json {
+            println!(
+                "{{\"status\":\"ok\",\"copied\":{},\"removed\":{},\"dry_run\":{},\"watch\":{},\"src\":\"{}\",\"dst\":\"{}\"}}",
+                copied,
+                removed,
+                options.dry_run,
+                options.watch,
+                escape_json(&format!("{}/{}", source.alias, src_bucket)),
+                escape_json(&format!("{}/{}", destination.alias, dst_bucket))
+            );
+        } else {
+            println!(
+                "Synced {} object(s) from {}/{} to {}/{} (removed: {}, dry-run: {}, watch: {})",
+                copied,
+                source.alias,
+                src_bucket,
+                destination.alias,
+                dst_bucket,
+                removed,
+                options.dry_run,
+                options.watch
+            );
+        }
+
+        if !options.watch {
+            break;
+        }
+        sleep(watch_interval());
     }
 
     Ok(())
@@ -2092,6 +2137,7 @@ mod tests {
             "mirror".to_string(),
             "--dry-run".to_string(),
             "--remove".to_string(),
+            "-w".to_string(),
             "--exclude".to_string(),
             "*.tmp".to_string(),
             "a/src/prefix".to_string(),
@@ -2100,6 +2146,7 @@ mod tests {
         let (opts, src, dst) = parse_sync_args(&args).expect("sync args should parse");
         assert!(opts.dry_run);
         assert!(opts.remove);
+        assert!(opts.watch);
         assert_eq!(opts.excludes, vec!["*.tmp".to_string()]);
         assert_eq!(opts.newer_than, None);
         assert_eq!(opts.older_than, None);
@@ -2130,6 +2177,7 @@ mod tests {
             "b/dst".to_string(),
         ];
         let (opts, _, _) = parse_sync_args(&args).expect("sync args should parse");
+        assert!(!opts.watch);
         assert_eq!(opts.newer_than, Some(864000));
         assert_eq!(opts.older_than, Some(3600));
     }

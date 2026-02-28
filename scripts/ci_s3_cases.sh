@@ -109,6 +109,29 @@ target/debug/s4 -C "$CFG_DIR" sync --newer-than "365d" "ci/$SRC_BUCKET/photos" "
 target/debug/s4 -C "$CFG_DIR" get "ci/$DST_BUCKET/newer-than/2024/a.txt" "$WORKDIR/newer-than-a.txt"
 cmp -s "$SRC1" "$WORKDIR/newer-than-a.txt"
 
+
+# --watch should continuously mirror new objects
+WATCH_EXPECT="$WORKDIR/watch.txt"
+WATCH_GOT="$WORKDIR/watch-got.txt"
+WATCH_LOG="$WORKDIR/watch.log"
+printf 'watch-check-%s
+' "$TS" > "$WATCH_EXPECT"
+S4_SYNC_WATCH_INTERVAL_SEC=1 target/debug/s4 -C "$CFG_DIR" sync --watch "ci/$SRC_BUCKET/photos" "ci/$DST_BUCKET/watch-copy" > "$WATCH_LOG" 2>&1 &
+WATCH_PID=$!
+cleanup_watch() { kill "$WATCH_PID" 2>/dev/null || true; wait "$WATCH_PID" 2>/dev/null || true; }
+trap 'cleanup_watch; rm -rf "$WORKDIR"' EXIT
+sleep 2
+target/debug/s4 -C "$CFG_DIR" put "$WATCH_EXPECT" "ci/$SRC_BUCKET/photos/2024/watch.txt"
+for _ in $(seq 1 15); do
+  if target/debug/s4 -C "$CFG_DIR" get "ci/$DST_BUCKET/watch-copy/2024/watch.txt" "$WATCH_GOT" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+cmp -s "$WATCH_EXPECT" "$WATCH_GOT"
+cleanup_watch
+trap 'rm -rf "$WORKDIR"' EXIT
+
 # find/tree/head coverage
 target/debug/s4 -C "$CFG_DIR" find "ci/$SRC_BUCKET/photos" "2024" > "$WORKDIR/find.out"
 rg -q "photos/2024/a.txt|2024/a.txt" "$WORKDIR/find.out"
@@ -170,6 +193,8 @@ target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/exclude-copy/2024/a.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/exclude-copy/2024/b.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/newer-than/2024/a.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/newer-than/2024/b.txt"
+target/debug/s4 -C "$CFG_DIR" rm "ci/$SRC_BUCKET/photos/2024/watch.txt"
+target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/watch-copy/2024/watch.txt"
 
 target/debug/s4 -C "$CFG_DIR" rb "ci/$SRC_BUCKET"
 target/debug/s4 -C "$CFG_DIR" rb "ci/$DST_BUCKET"
