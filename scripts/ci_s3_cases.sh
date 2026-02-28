@@ -102,6 +102,20 @@ else
   exit 1
 fi
 
+# ilm coverage (placeholder behavior)
+if target/debug/s4 -C "$CFG_DIR" ilm rule > "$WORKDIR/ilm-rule.out"; then
+  rg -q "not implemented" "$WORKDIR/ilm-rule.out"
+else
+  echo "[ci] ilm rule command unexpectedly failed" >&2
+  exit 1
+fi
+if target/debug/s4 -C "$CFG_DIR" ilm restore > "$WORKDIR/ilm-restore.out"; then
+  rg -q "not implemented" "$WORKDIR/ilm-restore.out"
+else
+  echo "[ci] ilm restore command unexpectedly failed" >&2
+  exit 1
+fi
+
 # global flags coverage: resolve/custom header/limits
 EP_HOSTPORT="${S4_E2E_ENDPOINT#http://}"
 EP_HOSTPORT="${EP_HOSTPORT#https://}"

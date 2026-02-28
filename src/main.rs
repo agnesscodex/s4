@@ -86,6 +86,18 @@ struct IdpCommand {
 }
 
 #[derive(Debug)]
+enum IlmKind {
+    Rule,
+    Tier,
+    Restore,
+}
+
+#[derive(Debug)]
+struct IlmCommand {
+    kind: IlmKind,
+}
+
+#[derive(Debug)]
 struct Endpoint {
     scheme: String,
     host: String,
@@ -352,6 +364,7 @@ fn handle_s3_command(
         && command != "encrypt"
         && command != "event"
         && command != "idp"
+        && command != "ilm"
         && args.len() <= target_idx
     {
         return Err(format!("usage: s4 {command} ..."));
@@ -471,6 +484,11 @@ fn handle_s3_command(
     if command == "idp" {
         let idp_cmd = parse_idp_args(args)?;
         return cmd_idp(idp_cmd, json);
+    }
+
+    if command == "ilm" {
+        let ilm_cmd = parse_ilm_args(args)?;
+        return cmd_ilm(ilm_cmd, json);
     }
 
     if command == "sync" || command == "mirror" {
@@ -604,6 +622,37 @@ fn handle_s3_command(
         }
         _ => Err(format!("unsupported command: {command}")),
     }
+}
+
+fn parse_ilm_args(args: &[String]) -> Result<IlmCommand, String> {
+    if args.len() < 2 {
+        return Err("usage: s4 ilm <rule|tier|restore> ...".to_string());
+    }
+    let kind = match args[1].as_str() {
+        "rule" => IlmKind::Rule,
+        "tier" => IlmKind::Tier,
+        "restore" => IlmKind::Restore,
+        "help" | "h" => return Err("usage: s4 ilm <rule|tier|restore> ...".to_string()),
+        other => return Err(format!("unknown ilm subcommand: {other}")),
+    };
+    Ok(IlmCommand { kind })
+}
+
+fn cmd_ilm(cmd: IlmCommand, json: bool) -> Result<(), String> {
+    let section = match cmd.kind {
+        IlmKind::Rule => "rule",
+        IlmKind::Tier => "tier",
+        IlmKind::Restore => "restore",
+    };
+    if json {
+        println!(
+            "{{\"status\":\"not_implemented\",\"command\":\"ilm\",\"section\":\"{}\",\"message\":\"ilm management is not implemented in this build\"}}",
+            section
+        );
+    } else {
+        println!("ilm {} is not implemented in this build", section);
+    }
+    Ok(())
 }
 
 fn parse_idp_args(args: &[String]) -> Result<IdpCommand, String> {
@@ -2420,6 +2469,7 @@ COMMANDS:
   encrypt    manage bucket encryption config (set/clear/info)
   event      manage bucket notifications (add/remove/list)
   idp        manage identity providers (openid/ldap) [placeholder]
+  ilm        manage lifecycle (rule/tier/restore) [placeholder]
   sync       sync objects from source bucket/prefix to destination
   mirror     alias for sync (mc-compatible naming)
   cp         copy object(s) between local and S3
@@ -2449,12 +2499,12 @@ FLAGS:
 #[cfg(test)]
 mod tests {
     use super::{
-        AliasConfig, AppConfig, CorsCommand, EncryptCommand, EventCommand, IdpKind,
+        AliasConfig, AppConfig, CorsCommand, EncryptCommand, EventCommand, IdpKind, IlmKind,
         build_complete_multipart_xml, extract_tag_values, is_excluded, looks_ready_xml,
         parse_config, parse_cors_args, parse_encrypt_args, parse_event_args, parse_globals,
-        parse_human_duration, parse_idp_args, parse_sync_args, parse_target, serialize_config,
-        sync_destination_key, uri_encode_path, uri_encode_query_component, wildcard_match,
-        xml_unescape,
+        parse_human_duration, parse_idp_args, parse_ilm_args, parse_sync_args, parse_target,
+        serialize_config, sync_destination_key, uri_encode_path, uri_encode_query_component,
+        wildcard_match, xml_unescape,
     };
     use std::collections::BTreeMap;
 
@@ -2726,6 +2776,26 @@ mod tests {
         match parsed.kind {
             IdpKind::Ldap => {}
             _ => panic!("expected ldap"),
+        }
+    }
+
+    #[test]
+    fn parse_ilm_args_rule_works() {
+        let args = vec!["ilm".to_string(), "rule".to_string()];
+        let parsed = parse_ilm_args(&args).expect("ilm args should parse");
+        match parsed.kind {
+            IlmKind::Rule => {}
+            _ => panic!("expected rule"),
+        }
+    }
+
+    #[test]
+    fn parse_ilm_args_restore_works() {
+        let args = vec!["ilm".to_string(), "restore".to_string()];
+        let parsed = parse_ilm_args(&args).expect("ilm args should parse");
+        match parsed.kind {
+            IlmKind::Restore => {}
+            _ => panic!("expected restore"),
         }
     }
 
