@@ -70,3 +70,23 @@ S4_E2E_PATH_STYLE=1 \
 - `S3_ENDPOINT_PORT` (например `10117`)
 - `S3_ACCESS_KEY_ID` (например `my-secret-key_id`)
 - `S3_SECRET_ACCESS_KEY` (например `my-secret-access-key`)
+
+
+## Мониторинг CI без ручного кликанья
+
+Добавлен скрипт `scripts/monitor_ci.sh`, который через GitHub API показывает статус и джобы workflow `CI` для текущего коммита/ветки.
+
+Примеры:
+
+```bash
+# одноразовая проверка последнего CI для текущего коммита
+GITHUB_TOKEN=... ./scripts/monitor_ci.sh --sha "$(git rev-parse HEAD)"
+
+# ждать до завершения и вернуть exit code (0=success)
+GITHUB_TOKEN=... ./scripts/monitor_ci.sh --wait --sha "$(git rev-parse HEAD)"
+
+# ждать и автоматически rerun failed jobs
+GITHUB_TOKEN=... ./scripts/monitor_ci.sh --wait --rerun-failed --sha "$(git rev-parse HEAD)"
+```
+
+Если `GITHUB_REPOSITORY` не задан, скрипт сам определит `owner/repo` из `git remote origin`.
