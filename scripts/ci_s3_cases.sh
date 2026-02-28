@@ -130,6 +130,13 @@ rg -q "<Status>ON</Status>|ON" "$WORKDIR/legalhold-info-on.out"
 target/debug/s4 -C "$CFG_DIR" legalhold clear "ci/$LH_BUCKET/lh.txt"
 target/debug/s4 -C "$CFG_DIR" legalhold info "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/legalhold-info-off.out"
 rg -q "<Status>OFF</Status>|OFF" "$WORKDIR/legalhold-info-off.out"
+
+# retention coverage (requires object-lock bucket)
+RET_UNTIL="2030-01-01T00:00:00Z"
+target/debug/s4 -C "$CFG_DIR" retention set "ci/$LH_BUCKET/lh.txt" --mode GOVERNANCE --retain-until "$RET_UNTIL"
+target/debug/s4 -C "$CFG_DIR" retention info "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/retention-info.out"
+rg -q "GOVERNANCE|Mode|RetainUntilDate" "$WORKDIR/retention-info.out"
+target/debug/s4 -C "$CFG_DIR" retention clear "ci/$LH_BUCKET/lh.txt"
 target/debug/s4 -C "$CFG_DIR" get "ci/$LH_BUCKET/lh.txt" "$LH_GOT"
 cmp -s "$LH_LOCAL" "$LH_GOT"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$LH_BUCKET/lh.txt"

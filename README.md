@@ -6,7 +6,7 @@
 
 - Глобальные флаги: `-C/--config-dir`, `--json`, `--debug`, `--insecure`, `--resolve`, `--limit-upload`, `--limit-download`, `--custom-header/-H`.
 - Управление alias: `alias set|ls|rm`.
-- S3-команды: `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `cors`, `encrypt`, `event`, `legalhold`, `idp`, `ilm`, `replicate`, `sync`, `mirror` (alias к `sync`), `cp`, `mv`, `find`, `tree`, `head`, `pipe`, `ping`, `ready`.
+- S3-команды: `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `cors`, `encrypt`, `event`, `legalhold`, `retention`, `idp`, `ilm`, `replicate`, `sync`, `mirror` (alias к `sync`), `cp`, `mv`, `find`, `tree`, `head`, `pipe`, `ping`, `ready`.
 - AWS SigV4 подпись запросов реализована через встроенный Python helper (`python3`) и HTTP-вызовы через `curl`.
 - Для больших upload-ов (более 16 MiB) реализован multipart upload (`put`, `cp` local->s3, `sync/mirror`, `pipe`).
 - Формат конфига: `~/.s4/config.toml`.
@@ -44,6 +44,11 @@ s4 mb --with-lock local/lock-bucket
 s4 legalhold set local/lock-bucket/hello.txt
 s4 legalhold info local/lock-bucket/hello.txt
 s4 legalhold clear local/lock-bucket/hello.txt
+
+# retention (object-lock bucket required)
+s4 retention set local/lock-bucket/hello.txt --mode GOVERNANCE --retain-until 2030-01-01T00:00:00Z
+s4 retention info local/lock-bucket/hello.txt
+s4 retention clear local/lock-bucket/hello.txt
 
 # idp (placeholder in current build)
 s4 idp openid
@@ -170,7 +175,7 @@ GITHUB_TOKEN=... ./scripts/monitor_ci.sh --wait --rerun-failed --sha "$(git rev-
 
 ## Покрытие команд mc vs s4
 
-На текущем этапе в `s4` реализованы: `alias`, `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `cors`, `encrypt`, `event`, `legalhold`, `idp` (placeholder), `ilm` (placeholder), `replicate` (placeholder), `sync`, `mirror`, `cp`, `mv`, `find`, `tree`, `head`, `pipe`, `ping`, `ready`.
+На текущем этапе в `s4` реализованы: `alias`, `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `cors`, `encrypt`, `event`, `legalhold`, `retention`, `idp` (placeholder), `ilm` (placeholder), `replicate` (placeholder), `sync`, `mirror`, `cp`, `mv`, `find`, `tree`, `head`, `pipe`, `ping`, `ready`.
 
 Остальные команды из полного списка `mc` (например `admin`, `anonymous`, `watch`, `sql`, `tag`, и т.д.) пока **не реализованы** и требуют отдельных итераций.
 
@@ -192,3 +197,6 @@ GITHUB_TOKEN=... ./scripts/monitor_ci.sh --wait --rerun-failed --sha "$(git rev-
 
 
 > `replicate add|update|list|status|resync|export|import|remove|backlog` сейчас добавлены как placeholder-команды (возвращают `not implemented`) для совместимости CLI; полноценная server-side replication конфигурация будет отдельным этапом.
+
+
+> `retention set|clear|info` поддерживаются для объектов в бакетах с object-lock (используйте `mb --with-lock`).

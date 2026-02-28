@@ -105,6 +105,21 @@ enum LegalHoldCommand {
 }
 
 #[derive(Debug)]
+enum RetentionCommand {
+    Set {
+        target: S3Target,
+        mode: String,
+        retain_until: String,
+    },
+    Clear {
+        target: S3Target,
+    },
+    Info {
+        target: S3Target,
+    },
+}
+
+#[derive(Debug)]
 enum ReplicateSubcommand {
     Add,
     Update,
@@ -393,6 +408,7 @@ fn handle_s3_command(
         && command != "ilm"
         && command != "legalhold"
         && command != "replicate"
+        && command != "retention"
         && command != "mb"
         && args.len() <= target_idx
     {
@@ -560,6 +576,11 @@ fn handle_s3_command(
     if command == "legalhold" {
         let lh_cmd = parse_legalhold_args(args)?;
         return cmd_legalhold(config, lh_cmd, json, debug);
+    }
+
+    if command == "retention" {
+        let rt_cmd = parse_retention_args(args)?;
+        return cmd_retention(config, rt_cmd, json, debug);
     }
 
     if command == "replicate" {
@@ -1192,6 +1213,168 @@ fn cmd_legalhold(
             if json {
                 println!(
                     "{{\"bucket\":\"{}\",\"key\":\"{}\",\"legalhold\":\"{}\"}}",
+                    escape_json(&bucket),
+                    escape_json(&key),
+                    escape_json(&body)
+                );
+            } else {
+                print!("{}", body);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn parse_retention_args(args: &[String]) -> Result<RetentionCommand, String> {
+    if args.len() < 3 {
+        return Err("usage: s4 retention <set|clear|info> ...".to_string());
+    }
+    match args[1].as_str() {
+        "set" => {
+            if args.len() < 4 {
+                return Err("usage: s4 retention set <alias/bucket/key> --mode <GOVERNANCE|COMPLIANCE> --retain-until <RFC3339>".to_string());
+            }
+            let target = parse_target(&args[2])?;
+            let mut mode: Option<String> = None;
+            let mut retain_until: Option<String> = None;
+            let mut i = 3;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--mode" => {
+                        let v = args.get(i + 1).ok_or("--mode expects a value")?;
+                        mode = Some(v.to_string());
+                        i += 2;
+                    }
+                    "--retain-until" => {
+                        let v = args.get(i + 1).ok_or("--retain-until expects a value")?;
+                        retain_until = Some(v.to_string());
+                        i += 2;
+                    }
+                    f if f.starts_with('-') => {
+                        return Err(format!("unknown retention set flag: {f}"));
+                    }
+                    other => return Err(format!("unexpected retention set argument: {other}")),
+                }
+            }
+            let mode = mode.ok_or("retention set requires --mode")?;
+            let retain_until = retain_until.ok_or("retention set requires --retain-until")?;
+            Ok(RetentionCommand::Set {
+                target,
+                mode,
+                retain_until,
+            })
+        }
+        "clear" => Ok(RetentionCommand::Clear {
+            target: parse_target(&args[2])?,
+        }),
+        "info" => Ok(RetentionCommand::Info {
+            target: parse_target(&args[2])?,
+        }),
+        "help" | "h" => Err("usage: s4 retention <set|clear|info> ...".to_string()),
+        other => Err(format!("unknown retention subcommand: {other}")),
+    }
+}
+
+fn cmd_retention(
+    config: &AppConfig,
+    cmd: RetentionCommand,
+    json: bool,
+    debug: bool,
+) -> Result<(), String> {
+    match cmd {
+        RetentionCommand::Set {
+            target,
+            mode,
+            retain_until,
+        } => {
+            let alias = config
+                .aliases
+                .get(&target.alias)
+                .ok_or_else(|| format!("unknown alias: {}", target.alias))?;
+            let bucket = req_bucket(&target, "retention set")?;
+            let key = req_key(&target, "retention set")?;
+            let body = format!(
+                "<Retention><Mode>{}</Mode><RetainUntilDate>{}</RetainUntilDate></Retention>",
+                mode, retain_until
+            );
+            let temp = env::temp_dir().join(format!("s4-retention-{}-set.xml", std::process::id()));
+            fs::write(&temp, body).map_err(|e| e.to_string())?;
+            let res = s3_request(
+                alias,
+                "PUT",
+                &bucket,
+                Some(&key),
+                "retention",
+                Some(&temp),
+                None,
+                debug,
+            );
+            let _ = fs::remove_file(&temp);
+            res?;
+            if json {
+                println!(
+                    "{{\"status\":\"ok\",\"command\":\"retention set\",\"bucket\":\"{}\",\"key\":\"{}\",\"mode\":\"{}\",\"retain_until\":\"{}\"}}",
+                    escape_json(&bucket),
+                    escape_json(&key),
+                    escape_json(&mode),
+                    escape_json(&retain_until)
+                );
+            } else {
+                println!(
+                    "Retention set for '{}/{}' mode={} retain-until={}",
+                    bucket, key, mode, retain_until
+                );
+            }
+            Ok(())
+        }
+        RetentionCommand::Clear { target } => {
+            let alias = config
+                .aliases
+                .get(&target.alias)
+                .ok_or_else(|| format!("unknown alias: {}", target.alias))?;
+            let bucket = req_bucket(&target, "retention clear")?;
+            let key = req_key(&target, "retention clear")?;
+            s3_request(
+                alias,
+                "DELETE",
+                &bucket,
+                Some(&key),
+                "retention",
+                None,
+                None,
+                debug,
+            )?;
+            if json {
+                println!(
+                    "{{\"status\":\"ok\",\"command\":\"retention clear\",\"bucket\":\"{}\",\"key\":\"{}\"}}",
+                    escape_json(&bucket),
+                    escape_json(&key)
+                );
+            } else {
+                println!("Retention cleared for '{}/{}'", bucket, key);
+            }
+            Ok(())
+        }
+        RetentionCommand::Info { target } => {
+            let alias = config
+                .aliases
+                .get(&target.alias)
+                .ok_or_else(|| format!("unknown alias: {}", target.alias))?;
+            let bucket = req_bucket(&target, "retention info")?;
+            let key = req_key(&target, "retention info")?;
+            let body = s3_request(
+                alias,
+                "GET",
+                &bucket,
+                Some(&key),
+                "retention",
+                None,
+                None,
+                debug,
+            )?;
+            if json {
+                println!(
+                    "{{\"bucket\":\"{}\",\"key\":\"{}\",\"retention\":\"{}\"}}",
                     escape_json(&bucket),
                     escape_json(&key),
                     escape_json(&body)
@@ -2707,6 +2890,7 @@ COMMANDS:
   mb         make bucket
   rb         remove bucket
   legalhold  manage legal hold for object(s) (set/clear/info)
+  retention  manage retention for object(s) (set/clear/info)
   replicate  manage server-side bucket replication [placeholder]
   put        upload object
   get        download object
@@ -2751,12 +2935,12 @@ NOTE:
 mod tests {
     use super::{
         AliasConfig, AppConfig, CorsCommand, EncryptCommand, EventCommand, IdpKind, IlmKind,
-        LegalHoldCommand, ReplicateSubcommand, build_complete_multipart_xml, extract_tag_values,
-        is_excluded, looks_ready_xml, parse_config, parse_cors_args, parse_encrypt_args,
-        parse_event_args, parse_globals, parse_human_duration, parse_idp_args, parse_ilm_args,
-        parse_legalhold_args, parse_replicate_args, parse_sync_args, parse_target,
-        serialize_config, sync_destination_key, uri_encode_path, uri_encode_query_component,
-        wildcard_match, xml_unescape,
+        LegalHoldCommand, ReplicateSubcommand, RetentionCommand, build_complete_multipart_xml,
+        extract_tag_values, is_excluded, looks_ready_xml, parse_config, parse_cors_args,
+        parse_encrypt_args, parse_event_args, parse_globals, parse_human_duration, parse_idp_args,
+        parse_ilm_args, parse_legalhold_args, parse_replicate_args, parse_retention_args,
+        parse_sync_args, parse_target, serialize_config, sync_destination_key, uri_encode_path,
+        uri_encode_query_component, wildcard_match, xml_unescape,
     };
     use std::collections::BTreeMap;
 
@@ -3111,6 +3295,52 @@ mod tests {
         match parsed.subcommand {
             ReplicateSubcommand::Backlog => {}
             _ => panic!("expected backlog"),
+        }
+    }
+
+    #[test]
+    fn parse_retention_args_set_works() {
+        let args = vec![
+            "retention".to_string(),
+            "set".to_string(),
+            "a/b/k".to_string(),
+            "--mode".to_string(),
+            "GOVERNANCE".to_string(),
+            "--retain-until".to_string(),
+            "2030-01-01T00:00:00Z".to_string(),
+        ];
+        let parsed = parse_retention_args(&args).expect("retention args should parse");
+        match parsed {
+            RetentionCommand::Set {
+                target,
+                mode,
+                retain_until,
+            } => {
+                assert_eq!(target.alias, "a");
+                assert_eq!(target.bucket.as_deref(), Some("b"));
+                assert_eq!(target.key.as_deref(), Some("k"));
+                assert_eq!(mode, "GOVERNANCE");
+                assert_eq!(retain_until, "2030-01-01T00:00:00Z");
+            }
+            _ => panic!("expected retention set"),
+        }
+    }
+
+    #[test]
+    fn parse_retention_args_info_works() {
+        let args = vec![
+            "retention".to_string(),
+            "info".to_string(),
+            "a/b/k".to_string(),
+        ];
+        let parsed = parse_retention_args(&args).expect("retention args should parse");
+        match parsed {
+            RetentionCommand::Info { target } => {
+                assert_eq!(target.alias, "a");
+                assert_eq!(target.bucket.as_deref(), Some("b"));
+                assert_eq!(target.key.as_deref(), Some("k"));
+            }
+            _ => panic!("expected retention info"),
         }
     }
 
