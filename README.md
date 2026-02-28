@@ -60,11 +60,13 @@ s4 ready local
 - `--dry-run`
 - `--remove`
 - `--exclude <glob>` (можно указывать несколько раз; поддерживаются `*` и `?`)
+- `--newer-than <duration>`
+- `--older-than <duration>`
 - `--overwrite` (принимается для совместимости; текущее поведение и так перезаписывает целевые объекты)
 
 Пока **не реализовано** и возвращает явную ошибку `not implemented yet`:
 - `--watch/-w`, `--preserve/-a`, `--active-active`, `--disable-multipart`, `--exclude-bucket`,
-  `--exclude-storageclass`, `--older-than`, `--newer-than`, `--storage-class/--sc`, `--attr`,
+  `--exclude-storageclass`, `--storage-class/--sc`, `--attr`,
   `--monitoring-address`, `--retry`, `--summary`, `--skip-errors`, `--max-workers`, `--checksum`,
   `--enc-c`, `--enc-kms`, `--enc-s3`, `--region` и другие специальные флаги `mc mirror`.
 

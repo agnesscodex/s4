@@ -47,6 +47,8 @@ struct SyncOptions {
     dry_run: bool,
     remove: bool,
     excludes: Vec<String>,
+    newer_than: Option<u64>,
+    older_than: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -576,6 +578,16 @@ fn parse_sync_args(args: &[String]) -> Result<(SyncOptions, S3Target, S3Target),
                 opts.excludes.push(value.to_string());
                 i += 2;
             }
+            "--newer-than" => {
+                let value = args.get(i + 1).ok_or("--newer-than expects a value")?;
+                opts.newer_than = Some(parse_human_duration(value)?);
+                i += 2;
+            }
+            "--older-than" => {
+                let value = args.get(i + 1).ok_or("--older-than expects a value")?;
+                opts.older_than = Some(parse_human_duration(value)?);
+                i += 2;
+            }
             "--watch" | "-w" => {
                 return Err("sync/mirror flag not implemented yet: --watch/-w".to_string());
             }
@@ -637,6 +649,86 @@ fn is_excluded(key: &str, patterns: &[String]) -> bool {
     patterns.iter().any(|p| wildcard_match(p, key))
 }
 
+fn parse_human_duration(input: &str) -> Result<u64, String> {
+    if input.is_empty() {
+        return Err("duration cannot be empty".to_string());
+    }
+    let mut total = 0u64;
+    let mut value = 0u64;
+    let mut has_unit = false;
+    for c in input.chars() {
+        if c.is_ascii_digit() {
+            value = value
+                .checked_mul(10)
+                .and_then(|v| v.checked_add((c as u8 - b'0') as u64))
+                .ok_or_else(|| "duration value overflow".to_string())?;
+            has_unit = false;
+            continue;
+        }
+        let unit = match c {
+            'd' => 86_400u64,
+            'h' => 3_600u64,
+            'm' => 60u64,
+            's' => 1u64,
+            _ => return Err(format!("unsupported duration unit: {c}")),
+        };
+        total = total
+            .checked_add(
+                value
+                    .checked_mul(unit)
+                    .ok_or_else(|| "duration overflow".to_string())?,
+            )
+            .ok_or_else(|| "duration overflow".to_string())?;
+        value = 0;
+        has_unit = true;
+    }
+    if !has_unit || value != 0 {
+        return Err("duration must end with unit (d/h/m/s)".to_string());
+    }
+    Ok(total)
+}
+
+fn object_age_seconds(
+    alias: &AliasConfig,
+    bucket: &str,
+    key: &str,
+    debug: bool,
+) -> Result<Option<u64>, String> {
+    let headers = s3_request(alias, "HEAD", bucket, Some(key), "", None, None, debug)?;
+    let mut last_modified: Option<String> = None;
+    for line in headers.lines() {
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("last-modified:") {
+            if let Some((_, value)) = line.split_once(':') {
+                last_modified = Some(value.trim().to_string());
+                break;
+            }
+        }
+    }
+    let Some(last_modified) = last_modified else {
+        return Ok(None);
+    };
+    let out = Command::new("python3")
+        .arg("-c")
+        .arg(
+            "import sys,time,email.utils; dt=email.utils.parsedate_to_datetime(sys.argv[1]); print(int(time.time()-dt.timestamp()))",
+        )
+        .arg(&last_modified)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!(
+            "failed to parse Last-Modified header: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let age = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<u64>()
+        .map_err(|e| e.to_string())?;
+    Ok(Some(age))
+}
+
 fn cmd_sync(
     config: &AppConfig,
     source: &S3Target,
@@ -660,10 +752,29 @@ fn cmd_sync(
     let dst_prefix = destination.key.clone().unwrap_or_default();
 
     let keys = list_object_keys(src_alias, &src_bucket, &src_prefix, debug)?;
-    let filtered_keys: Vec<String> = keys
-        .into_iter()
-        .filter(|k| !is_excluded(k, &options.excludes))
-        .collect();
+    let mut filtered_keys: Vec<String> = Vec::new();
+    for key in keys {
+        if is_excluded(&key, &options.excludes) {
+            continue;
+        }
+        if options.newer_than.is_some() || options.older_than.is_some() {
+            let age = object_age_seconds(src_alias, &src_bucket, &key, debug)?;
+            let Some(age) = age else {
+                continue;
+            };
+            if let Some(newer_than) = options.newer_than {
+                if age > newer_than {
+                    continue;
+                }
+            }
+            if let Some(older_than) = options.older_than {
+                if age < older_than {
+                    continue;
+                }
+            }
+        }
+        filtered_keys.push(key);
+    }
 
     let mut copied = 0usize;
     let mut removed = 0usize;
@@ -1879,9 +1990,9 @@ FLAGS:
 mod tests {
     use super::{
         AliasConfig, AppConfig, build_complete_multipart_xml, extract_tag_values, is_excluded,
-        looks_ready_xml, parse_config, parse_globals, parse_sync_args, parse_target,
-        serialize_config, sync_destination_key, uri_encode_path, uri_encode_query_component,
-        wildcard_match, xml_unescape,
+        looks_ready_xml, parse_config, parse_globals, parse_human_duration, parse_sync_args,
+        parse_target, serialize_config, sync_destination_key, uri_encode_path,
+        uri_encode_query_component, wildcard_match, xml_unescape,
     };
     use std::collections::BTreeMap;
 
@@ -1990,9 +2101,37 @@ mod tests {
         assert!(opts.dry_run);
         assert!(opts.remove);
         assert_eq!(opts.excludes, vec!["*.tmp".to_string()]);
+        assert_eq!(opts.newer_than, None);
+        assert_eq!(opts.older_than, None);
         assert_eq!(src.alias, "a");
         assert_eq!(dst.alias, "b");
         assert!(is_excluded("x.tmp", &opts.excludes));
+    }
+
+    #[test]
+    fn parse_human_duration_works() {
+        assert_eq!(parse_human_duration("10d").expect("duration"), 864000);
+        assert_eq!(
+            parse_human_duration("7d10h30m5s").expect("duration"),
+            642605
+        );
+        assert!(parse_human_duration("10").is_err());
+    }
+
+    #[test]
+    fn parse_sync_args_with_time_filters() {
+        let args = vec![
+            "sync".to_string(),
+            "--newer-than".to_string(),
+            "10d".to_string(),
+            "--older-than".to_string(),
+            "1h".to_string(),
+            "a/src".to_string(),
+            "b/dst".to_string(),
+        ];
+        let (opts, _, _) = parse_sync_args(&args).expect("sync args should parse");
+        assert_eq!(opts.newer_than, Some(864000));
+        assert_eq!(opts.older_than, Some(3600));
     }
 
     #[test]

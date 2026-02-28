@@ -96,6 +96,19 @@ if target/debug/s4 -C "$CFG_DIR" get "ci/$DST_BUCKET/sync-copy/2024/extraneous.t
   exit 1
 fi
 
+
+# --older-than should skip fresh objects
+target/debug/s4 -C "$CFG_DIR" sync --older-than "365d" "ci/$SRC_BUCKET/photos" "ci/$DST_BUCKET/older-than"
+if target/debug/s4 -C "$CFG_DIR" get "ci/$DST_BUCKET/older-than/2024/a.txt" "$WORKDIR/older-than-a.txt"; then
+  echo "[ci] --older-than unexpectedly copied fresh object" >&2
+  exit 1
+fi
+
+# --newer-than should include fresh objects
+target/debug/s4 -C "$CFG_DIR" sync --newer-than "365d" "ci/$SRC_BUCKET/photos" "ci/$DST_BUCKET/newer-than"
+target/debug/s4 -C "$CFG_DIR" get "ci/$DST_BUCKET/newer-than/2024/a.txt" "$WORKDIR/newer-than-a.txt"
+cmp -s "$SRC1" "$WORKDIR/newer-than-a.txt"
+
 # find/tree/head coverage
 target/debug/s4 -C "$CFG_DIR" find "ci/$SRC_BUCKET/photos" "2024" > "$WORKDIR/find.out"
 rg -q "photos/2024/a.txt|2024/a.txt" "$WORKDIR/find.out"
@@ -155,6 +168,8 @@ target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/mirror-copy/2024/a.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/mirror-copy/2024/b.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/exclude-copy/2024/a.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/exclude-copy/2024/b.txt"
+target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/newer-than/2024/a.txt"
+target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/newer-than/2024/b.txt"
 
 target/debug/s4 -C "$CFG_DIR" rb "ci/$SRC_BUCKET"
 target/debug/s4 -C "$CFG_DIR" rb "ci/$DST_BUCKET"
