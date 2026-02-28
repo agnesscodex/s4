@@ -98,6 +98,13 @@ struct IlmCommand {
 }
 
 #[derive(Debug)]
+enum LegalHoldCommand {
+    Set { target: S3Target },
+    Clear { target: S3Target },
+    Info { target: S3Target },
+}
+
+#[derive(Debug)]
 struct Endpoint {
     scheme: String,
     host: String,
@@ -365,6 +372,8 @@ fn handle_s3_command(
         && command != "event"
         && command != "idp"
         && command != "ilm"
+        && command != "legalhold"
+        && command != "mb"
         && args.len() <= target_idx
     {
         return Err(format!("usage: s4 {command} ..."));
@@ -375,6 +384,43 @@ fn handle_s3_command(
             return Err(format!("usage: s4 {command} <source> <target>"));
         }
         return cmd_cp_mv(command, config, &args[1], &args[2], json, debug);
+    }
+
+    if command == "mb" {
+        if args.len() < 2 {
+            return Err("usage: s4 mb [--with-lock] <alias/bucket>".to_string());
+        }
+        let mut with_lock = false;
+        let mut target_arg: Option<&String> = None;
+        let mut i = 1;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--with-lock" => {
+                    with_lock = true;
+                    i += 1;
+                }
+                x if x.starts_with('-') => return Err(format!("unknown mb flag: {x}")),
+                _ => {
+                    target_arg = Some(&args[i]);
+                    i += 1;
+                }
+            }
+        }
+        let target_val = target_arg.ok_or("usage: s4 mb [--with-lock] <alias/bucket>")?;
+        let target = parse_target(target_val)?;
+        let alias = config
+            .aliases
+            .get(&target.alias)
+            .ok_or_else(|| format!("unknown alias: {}", target.alias))?;
+        let bucket = req_bucket(&target, "mb")?;
+        if with_lock {
+            let headers = vec!["x-amz-bucket-object-lock-enabled: true".to_string()];
+            s3_request_with_headers(alias, "PUT", &bucket, None, "", None, None, &headers, debug)?;
+        } else {
+            s3_request(alias, "PUT", &bucket, None, "", None, None, debug)?;
+        }
+        print_status(json, "created", &bucket);
+        return Ok(());
     }
 
     if command == "find" {
@@ -491,6 +537,11 @@ fn handle_s3_command(
         return cmd_ilm(ilm_cmd, json);
     }
 
+    if command == "legalhold" {
+        let lh_cmd = parse_legalhold_args(args)?;
+        return cmd_legalhold(config, lh_cmd, json, debug);
+    }
+
     if command == "sync" || command == "mirror" {
         let (sync_opts, src, dst) = parse_sync_args(args)?;
         return cmd_sync(config, &src, &dst, &sync_opts, json, debug);
@@ -504,12 +555,6 @@ fn handle_s3_command(
 
     match command.as_str() {
         "ls" => cmd_ls(alias, &target, json, debug),
-        "mb" => {
-            let bucket = req_bucket(&target, "mb")?;
-            s3_request(alias, "PUT", &bucket, None, "", None, None, debug)?;
-            print_status(json, "created", &bucket);
-            Ok(())
-        }
         "rb" => {
             let bucket = req_bucket(&target, "rb")?;
             s3_request(alias, "DELETE", &bucket, None, "", None, None, debug)?;
@@ -1000,6 +1045,130 @@ fn cmd_event(config: &AppConfig, cmd: EventCommand, json: bool, debug: bool) -> 
                 println!(
                     "{{\"bucket\":\"{}\",\"notification\":\"{}\"}}",
                     escape_json(&bucket),
+                    escape_json(&body)
+                );
+            } else {
+                print!("{}", body);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn parse_legalhold_args(args: &[String]) -> Result<LegalHoldCommand, String> {
+    if args.len() < 3 {
+        return Err("usage: s4 legalhold <set|clear|info> <alias/bucket/key>".to_string());
+    }
+    match args[1].as_str() {
+        "set" => Ok(LegalHoldCommand::Set {
+            target: parse_target(&args[2])?,
+        }),
+        "clear" => Ok(LegalHoldCommand::Clear {
+            target: parse_target(&args[2])?,
+        }),
+        "info" => Ok(LegalHoldCommand::Info {
+            target: parse_target(&args[2])?,
+        }),
+        "help" | "h" => Err("usage: s4 legalhold <set|clear|info> <alias/bucket/key>".to_string()),
+        other => Err(format!("unknown legalhold subcommand: {other}")),
+    }
+}
+
+fn cmd_legalhold(
+    config: &AppConfig,
+    cmd: LegalHoldCommand,
+    json: bool,
+    debug: bool,
+) -> Result<(), String> {
+    match cmd {
+        LegalHoldCommand::Set { target } => {
+            let alias = config
+                .aliases
+                .get(&target.alias)
+                .ok_or_else(|| format!("unknown alias: {}", target.alias))?;
+            let bucket = req_bucket(&target, "legalhold set")?;
+            let key = req_key(&target, "legalhold set")?;
+            let body = "<LegalHold><Status>ON</Status></LegalHold>";
+            let temp = env::temp_dir().join(format!("s4-legalhold-{}-on.xml", std::process::id()));
+            fs::write(&temp, body).map_err(|e| e.to_string())?;
+            let res = s3_request(
+                alias,
+                "PUT",
+                &bucket,
+                Some(&key),
+                "legal-hold",
+                Some(&temp),
+                None,
+                debug,
+            );
+            let _ = fs::remove_file(&temp);
+            res?;
+            if json {
+                println!(
+                    "{{\"status\":\"ok\",\"command\":\"legalhold set\",\"bucket\":\"{}\",\"key\":\"{}\"}}",
+                    escape_json(&bucket),
+                    escape_json(&key)
+                );
+            } else {
+                println!("Legal hold set for '{}/{}'", bucket, key);
+            }
+            Ok(())
+        }
+        LegalHoldCommand::Clear { target } => {
+            let alias = config
+                .aliases
+                .get(&target.alias)
+                .ok_or_else(|| format!("unknown alias: {}", target.alias))?;
+            let bucket = req_bucket(&target, "legalhold clear")?;
+            let key = req_key(&target, "legalhold clear")?;
+            let body = "<LegalHold><Status>OFF</Status></LegalHold>";
+            let temp = env::temp_dir().join(format!("s4-legalhold-{}-off.xml", std::process::id()));
+            fs::write(&temp, body).map_err(|e| e.to_string())?;
+            let res = s3_request(
+                alias,
+                "PUT",
+                &bucket,
+                Some(&key),
+                "legal-hold",
+                Some(&temp),
+                None,
+                debug,
+            );
+            let _ = fs::remove_file(&temp);
+            res?;
+            if json {
+                println!(
+                    "{{\"status\":\"ok\",\"command\":\"legalhold clear\",\"bucket\":\"{}\",\"key\":\"{}\"}}",
+                    escape_json(&bucket),
+                    escape_json(&key)
+                );
+            } else {
+                println!("Legal hold cleared for '{}/{}'", bucket, key);
+            }
+            Ok(())
+        }
+        LegalHoldCommand::Info { target } => {
+            let alias = config
+                .aliases
+                .get(&target.alias)
+                .ok_or_else(|| format!("unknown alias: {}", target.alias))?;
+            let bucket = req_bucket(&target, "legalhold info")?;
+            let key = req_key(&target, "legalhold info")?;
+            let body = s3_request(
+                alias,
+                "GET",
+                &bucket,
+                Some(&key),
+                "legal-hold",
+                None,
+                None,
+                debug,
+            )?;
+            if json {
+                println!(
+                    "{{\"bucket\":\"{}\",\"key\":\"{}\",\"legalhold\":\"{}\"}}",
+                    escape_json(&bucket),
+                    escape_json(&key),
                     escape_json(&body)
                 );
             } else {
@@ -2460,6 +2629,7 @@ COMMANDS:
   ls         list buckets/objects
   mb         make bucket
   rb         remove bucket
+  legalhold  manage legal hold for object(s) (set/clear/info)
   put        upload object
   get        download object
   rm         remove object
@@ -2492,7 +2662,10 @@ FLAGS:
   --limit-download <RATE>
   -H, --custom-header <KEY:VALUE>
   -h, --help
-  -v, --version"
+  -v, --version
+
+NOTE:
+  mb supports --with-lock for object-lock buckets (used by legalhold tests)"
     );
 }
 
@@ -2500,11 +2673,11 @@ FLAGS:
 mod tests {
     use super::{
         AliasConfig, AppConfig, CorsCommand, EncryptCommand, EventCommand, IdpKind, IlmKind,
-        build_complete_multipart_xml, extract_tag_values, is_excluded, looks_ready_xml,
-        parse_config, parse_cors_args, parse_encrypt_args, parse_event_args, parse_globals,
-        parse_human_duration, parse_idp_args, parse_ilm_args, parse_sync_args, parse_target,
-        serialize_config, sync_destination_key, uri_encode_path, uri_encode_query_component,
-        wildcard_match, xml_unescape,
+        LegalHoldCommand, build_complete_multipart_xml, extract_tag_values, is_excluded,
+        looks_ready_xml, parse_config, parse_cors_args, parse_encrypt_args, parse_event_args,
+        parse_globals, parse_human_duration, parse_idp_args, parse_ilm_args, parse_legalhold_args,
+        parse_sync_args, parse_target, serialize_config, sync_destination_key, uri_encode_path,
+        uri_encode_query_component, wildcard_match, xml_unescape,
     };
     use std::collections::BTreeMap;
 
@@ -2796,6 +2969,42 @@ mod tests {
         match parsed.kind {
             IlmKind::Restore => {}
             _ => panic!("expected restore"),
+        }
+    }
+
+    #[test]
+    fn parse_legalhold_args_set_works() {
+        let args = vec![
+            "legalhold".to_string(),
+            "set".to_string(),
+            "a/b/k".to_string(),
+        ];
+        let parsed = parse_legalhold_args(&args).expect("legalhold args should parse");
+        match parsed {
+            LegalHoldCommand::Set { target } => {
+                assert_eq!(target.alias, "a");
+                assert_eq!(target.bucket.as_deref(), Some("b"));
+                assert_eq!(target.key.as_deref(), Some("k"));
+            }
+            _ => panic!("expected legalhold set"),
+        }
+    }
+
+    #[test]
+    fn parse_legalhold_args_info_works() {
+        let args = vec![
+            "legalhold".to_string(),
+            "info".to_string(),
+            "a/b/k".to_string(),
+        ];
+        let parsed = parse_legalhold_args(&args).expect("legalhold args should parse");
+        match parsed {
+            LegalHoldCommand::Info { target } => {
+                assert_eq!(target.alias, "a");
+                assert_eq!(target.bucket.as_deref(), Some("b"));
+                assert_eq!(target.key.as_deref(), Some("k"));
+            }
+            _ => panic!("expected legalhold info"),
         }
     }
 

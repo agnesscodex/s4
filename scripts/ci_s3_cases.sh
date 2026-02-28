@@ -116,6 +116,25 @@ else
   exit 1
 fi
 
+# legalhold coverage (requires bucket with object lock)
+LH_BUCKET="s4-legalhold-${TS}"
+LH_LOCAL="$WORKDIR/legalhold.txt"
+LH_GOT="$WORKDIR/legalhold-got.txt"
+printf 'legalhold-%s
+' "$TS" > "$LH_LOCAL"
+target/debug/s4 -C "$CFG_DIR" mb --with-lock "ci/$LH_BUCKET"
+target/debug/s4 -C "$CFG_DIR" put "$LH_LOCAL" "ci/$LH_BUCKET/lh.txt"
+target/debug/s4 -C "$CFG_DIR" legalhold set "ci/$LH_BUCKET/lh.txt"
+target/debug/s4 -C "$CFG_DIR" legalhold info "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/legalhold-info-on.out"
+rg -q "<Status>ON</Status>|ON" "$WORKDIR/legalhold-info-on.out"
+target/debug/s4 -C "$CFG_DIR" legalhold clear "ci/$LH_BUCKET/lh.txt"
+target/debug/s4 -C "$CFG_DIR" legalhold info "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/legalhold-info-off.out"
+rg -q "<Status>OFF</Status>|OFF" "$WORKDIR/legalhold-info-off.out"
+target/debug/s4 -C "$CFG_DIR" get "ci/$LH_BUCKET/lh.txt" "$LH_GOT"
+cmp -s "$LH_LOCAL" "$LH_GOT"
+target/debug/s4 -C "$CFG_DIR" rm "ci/$LH_BUCKET/lh.txt"
+target/debug/s4 -C "$CFG_DIR" rb "ci/$LH_BUCKET"
+
 # global flags coverage: resolve/custom header/limits
 EP_HOSTPORT="${S4_E2E_ENDPOINT#http://}"
 EP_HOSTPORT="${EP_HOSTPORT#https://}"
