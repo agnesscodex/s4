@@ -48,6 +48,21 @@ target/debug/s4 -C "$CFG_DIR" get "ci/$DST_BUCKET/mirror-copy/2024/b.txt" "$OUT2
 cmp -s "$SRC1" "$OUT1"
 cmp -s "$SRC2" "$OUT2"
 
+# cp/mv coverage
+CP_LOCAL="$WORKDIR/cp-local.txt"
+CP_BACK="$WORKDIR/cp-back.txt"
+printf 'cp-check-%s
+' "$TS" > "$CP_LOCAL"
+
+target/debug/s4 -C "$CFG_DIR" cp "$CP_LOCAL" "ci/$SRC_BUCKET/cp/local.txt"
+target/debug/s4 -C "$CFG_DIR" cp "ci/$SRC_BUCKET/cp/local.txt" "$CP_BACK"
+cmp -s "$CP_LOCAL" "$CP_BACK"
+
+target/debug/s4 -C "$CFG_DIR" cp "ci/$SRC_BUCKET/cp/local.txt" "ci/$DST_BUCKET/cp/copied.txt"
+target/debug/s4 -C "$CFG_DIR" mv "ci/$DST_BUCKET/cp/copied.txt" "ci/$DST_BUCKET/cp/moved.txt"
+target/debug/s4 -C "$CFG_DIR" rm "ci/$SRC_BUCKET/cp/local.txt"
+target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/cp/moved.txt"
+
 target/debug/s4 -C "$CFG_DIR" rm "ci/$SRC_BUCKET/photos/2024/a.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$SRC_BUCKET/photos/2024/b.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/sync-copy/2024/a.txt"

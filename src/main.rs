@@ -89,9 +89,8 @@ fn run() -> Result<(), String> {
 
     match rest[0].as_str() {
         "alias" => handle_alias(&rest[1..], &mut config, &config_path, opts.json),
-        "ls" | "mb" | "rb" | "put" | "get" | "rm" | "stat" | "cat" | "sync" | "mirror" => {
-            handle_s3_command(&rest, &config, opts.json, opts.debug)
-        }
+        "ls" | "mb" | "rb" | "put" | "get" | "rm" | "stat" | "cat" | "sync" | "mirror" | "cp"
+        | "mv" => handle_s3_command(&rest, &config, opts.json, opts.debug),
         _ => Err(format!("unknown command: {}", rest[0])),
     }
 }
@@ -243,8 +242,20 @@ fn handle_s3_command(
 ) -> Result<(), String> {
     let command = &args[0];
     let target_idx = if command == "put" { 2 } else { 1 };
-    if command != "sync" && command != "mirror" && args.len() <= target_idx {
+    if command != "sync"
+        && command != "mirror"
+        && command != "cp"
+        && command != "mv"
+        && args.len() <= target_idx
+    {
         return Err(format!("usage: s4 {command} ..."));
+    }
+
+    if command == "cp" || command == "mv" {
+        if args.len() < 3 {
+            return Err(format!("usage: s4 {command} <source> <target>"));
+        }
+        return cmd_cp_mv(command, config, &args[1], &args[2], json, debug);
     }
 
     if command == "sync" || command == "mirror" {
@@ -388,6 +399,7 @@ fn handle_s3_command(
             Ok(())
         }
         "sync" | "mirror" => unreachable!(),
+        "cp" | "mv" => unreachable!(),
         _ => Err(format!("unsupported command: {command}")),
     }
 }
@@ -460,6 +472,151 @@ fn cmd_sync(
         );
     }
 
+    Ok(())
+}
+
+fn cmd_cp_mv(
+    command: &str,
+    config: &AppConfig,
+    source: &str,
+    target: &str,
+    json: bool,
+    debug: bool,
+) -> Result<(), String> {
+    let src = classify_ref(config, source);
+    let dst = classify_ref(config, target);
+
+    match (&src, &dst) {
+        (ObjectRef::Local(src_path), ObjectRef::S3(dst_s3)) => {
+            let body_path = PathBuf::from(src_path);
+            if !body_path.exists() {
+                return Err(format!("source file not found: {}", body_path.display()));
+            }
+            s3_request(
+                &dst_s3.alias,
+                "PUT",
+                &dst_s3.bucket,
+                Some(&dst_s3.key),
+                "",
+                Some(&body_path),
+                None,
+                debug,
+            )?;
+            if command == "mv" {
+                fs::remove_file(&body_path).map_err(|e| e.to_string())?;
+            }
+        }
+        (ObjectRef::S3(src_s3), ObjectRef::Local(dst_path)) => {
+            let out = PathBuf::from(dst_path);
+            if let Some(parent) = out.parent() {
+                if !parent.as_os_str().is_empty() {
+                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+            }
+            s3_request(
+                &src_s3.alias,
+                "GET",
+                &src_s3.bucket,
+                Some(&src_s3.key),
+                "",
+                None,
+                Some(&out),
+                debug,
+            )?;
+            if command == "mv" {
+                s3_request(
+                    &src_s3.alias,
+                    "DELETE",
+                    &src_s3.bucket,
+                    Some(&src_s3.key),
+                    "",
+                    None,
+                    None,
+                    debug,
+                )?;
+            }
+        }
+        (ObjectRef::S3(src_s3), ObjectRef::S3(dst_s3)) => {
+            copy_object_s3_to_s3(src_s3, dst_s3, debug)?;
+            if command == "mv" {
+                s3_request(
+                    &src_s3.alias,
+                    "DELETE",
+                    &src_s3.bucket,
+                    Some(&src_s3.key),
+                    "",
+                    None,
+                    None,
+                    debug,
+                )?;
+            }
+        }
+        (ObjectRef::Local(src_path), ObjectRef::Local(dst_path)) => {
+            fs::copy(src_path, dst_path).map_err(|e| e.to_string())?;
+            if command == "mv" {
+                fs::remove_file(src_path).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
+    if json {
+        println!(
+            "{{\"status\":\"ok\",\"command\":\"{}\",\"source\":\"{}\",\"target\":\"{}\"}}",
+            escape_json(command),
+            escape_json(source),
+            escape_json(target)
+        );
+    } else {
+        println!("{}: {} -> {}", command, source, target);
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct S3ObjectRef {
+    alias: AliasConfig,
+    bucket: String,
+    key: String,
+}
+
+enum ObjectRef {
+    S3(S3ObjectRef),
+    Local(String),
+}
+
+fn classify_ref(config: &AppConfig, value: &str) -> ObjectRef {
+    if let Ok(t) = parse_target(value) {
+        if let Some(alias) = config.aliases.get(&t.alias) {
+            if let (Some(bucket), Some(key)) = (t.bucket, t.key) {
+                return ObjectRef::S3(S3ObjectRef {
+                    alias: alias.clone(),
+                    bucket,
+                    key,
+                });
+            }
+        }
+    }
+    ObjectRef::Local(value.to_string())
+}
+
+fn copy_object_s3_to_s3(src: &S3ObjectRef, dst: &S3ObjectRef, debug: bool) -> Result<(), String> {
+    let copy_source = format!(
+        "/{}/{}",
+        uri_encode_segment(&src.bucket),
+        uri_encode_path(&src.key)
+    );
+    let headers = vec![format!("x-amz-copy-source: {}", copy_source)];
+    s3_request_with_headers(
+        &dst.alias,
+        "PUT",
+        &dst.bucket,
+        Some(&dst.key),
+        "",
+        None,
+        None,
+        &headers,
+        debug,
+    )?;
     Ok(())
 }
 
@@ -609,6 +766,30 @@ fn s3_request(
     output_file: Option<&Path>,
     debug: bool,
 ) -> Result<String, String> {
+    s3_request_with_headers(
+        alias,
+        method,
+        bucket,
+        key,
+        query,
+        upload_file,
+        output_file,
+        &[],
+        debug,
+    )
+}
+
+fn s3_request_with_headers(
+    alias: &AliasConfig,
+    method: &str,
+    bucket: &str,
+    key: Option<&str>,
+    query: &str,
+    upload_file: Option<&Path>,
+    output_file: Option<&Path>,
+    extra_headers: &[String],
+    debug: bool,
+) -> Result<String, String> {
     let endpoint = parse_endpoint(&alias.endpoint)?;
     let mut uri_path = endpoint.base_path.clone();
 
@@ -660,6 +841,10 @@ fn s3_request(
         .arg(format!("x-amz-content-sha256: {}", payload_hash))
         .arg("-H")
         .arg(format!("Authorization: {}", sign.authorization));
+
+    for header in extra_headers {
+        cmd.arg("-H").arg(header);
+    }
 
     if let Some(file) = upload_file {
         cmd.arg("--data-binary").arg(format!("@{}", file.display()));
@@ -930,7 +1115,7 @@ fn print_status(json: bool, field: &str, value: &str) {
 
 fn print_help() {
     println!(
-        "s4 - S3 client utility in Rust\n\nUSAGE:\n  s4 [FLAGS] COMMAND [ARGS]\n\nCOMMANDS:\n  alias      manage aliases in local config\n  ls         list buckets/objects\n  mb         make bucket\n  rb         remove bucket\n  put        upload object\n  get        download object\n  rm         remove object\n  stat       object metadata (raw headers)\n  cat        print object content\n  sync       sync objects from source bucket/prefix to destination\n  mirror     alias for sync (mc-compatible naming)\n  version    print version\n\nFLAGS:\n  -C, --config-dir <DIR>\n  --json\n  --debug\n  --insecure\n  -h, --help\n  -v, --version"
+        "s4 - S3 client utility in Rust\n\nUSAGE:\n  s4 [FLAGS] COMMAND [ARGS]\n\nCOMMANDS:\n  alias      manage aliases in local config\n  ls         list buckets/objects\n  mb         make bucket\n  rb         remove bucket\n  put        upload object\n  get        download object\n  rm         remove object\n  stat       object metadata (raw headers)\n  cat        print object content\n  sync       sync objects from source bucket/prefix to destination\n  mirror     alias for sync (mc-compatible naming)\n  cp         copy object(s) between local and S3\n  mv         move object(s) between local and S3\n  version    print version\n\nFLAGS:\n  -C, --config-dir <DIR>\n  --json\n  --debug\n  --insecure\n  -h, --help\n  -v, --version"
     );
 }
 
