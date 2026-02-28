@@ -88,6 +88,20 @@ target/debug/s4 -C "$CFG_DIR" event ls "ci/$SRC_BUCKET" > "$WORKDIR/event-list.o
 rg -q "NotificationConfiguration|QueueConfiguration|Event" "$WORKDIR/event-list.out"
 target/debug/s4 -C "$CFG_DIR" event rm "ci/$SRC_BUCKET" --force
 
+# idp coverage (placeholder behavior)
+if target/debug/s4 -C "$CFG_DIR" idp openid > "$WORKDIR/idp-openid.out"; then
+  rg -q "not implemented" "$WORKDIR/idp-openid.out"
+else
+  echo "[ci] idp openid command unexpectedly failed" >&2
+  exit 1
+fi
+if target/debug/s4 -C "$CFG_DIR" idp ldap > "$WORKDIR/idp-ldap.out"; then
+  rg -q "not implemented" "$WORKDIR/idp-ldap.out"
+else
+  echo "[ci] idp ldap command unexpectedly failed" >&2
+  exit 1
+fi
+
 # global flags coverage: resolve/custom header/limits
 EP_HOSTPORT="${S4_E2E_ENDPOINT#http://}"
 EP_HOSTPORT="${EP_HOSTPORT#https://}"

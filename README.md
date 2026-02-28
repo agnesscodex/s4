@@ -6,7 +6,7 @@
 
 - Глобальные флаги: `-C/--config-dir`, `--json`, `--debug`, `--insecure`, `--resolve`, `--limit-upload`, `--limit-download`, `--custom-header/-H`.
 - Управление alias: `alias set|ls|rm`.
-- S3-команды: `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `cors`, `encrypt`, `event`, `sync`, `mirror` (alias к `sync`), `cp`, `mv`, `find`, `tree`, `head`, `pipe`, `ping`, `ready`.
+- S3-команды: `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `cors`, `encrypt`, `event`, `idp`, `sync`, `mirror` (alias к `sync`), `cp`, `mv`, `find`, `tree`, `head`, `pipe`, `ping`, `ready`.
 - AWS SigV4 подпись запросов реализована через встроенный Python helper (`python3`) и HTTP-вызовы через `curl`.
 - Для больших upload-ов (более 16 MiB) реализован multipart upload (`put`, `cp` local->s3, `sync/mirror`, `pipe`).
 - Формат конфига: `~/.s4/config.toml`.
@@ -38,6 +38,10 @@ s4 encrypt clear local/test-bucket
 s4 event add local/test-bucket ./notification.xml
 s4 event ls local/test-bucket
 s4 event rm local/test-bucket --force
+
+# idp (placeholder in current build)
+s4 idp openid
+s4 idp ldap
 
 s4 rm local/test-bucket/hello.txt
 s4 rb local/test-bucket
@@ -151,7 +155,7 @@ GITHUB_TOKEN=... ./scripts/monitor_ci.sh --wait --rerun-failed --sha "$(git rev-
 
 ## Покрытие команд mc vs s4
 
-На текущем этапе в `s4` реализованы: `alias`, `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `cors`, `encrypt`, `sync`, `mirror`, `cp`, `mv`, `find`, `tree`, `head`, `pipe`, `ping`, `ready`.
+На текущем этапе в `s4` реализованы: `alias`, `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `cors`, `encrypt`, `event`, `idp` (placeholder), `sync`, `mirror`, `cp`, `mv`, `find`, `tree`, `head`, `pipe`, `ping`, `ready`.
 
 Остальные команды из полного списка `mc` (например `admin`, `anonymous`, `watch`, `replicate`, `sql`, `tag`, и т.д.) пока **не реализованы** и требуют отдельных итераций.
 
@@ -161,3 +165,6 @@ GITHUB_TOKEN=... ./scripts/monitor_ci.sh --wait --rerun-failed --sha "$(git rev-
 Сейчас поддерживаются глобальные флаги: `-C/--config-dir`, `--json`, `--debug`, `--insecure`, `--resolve`, `--limit-upload`, `--limit-download`, `--custom-header/-H`, `-h/--help`, `-v/--version`.
 
 Флаги из `mc`, которые пока не реализованы: `--quiet`, `--disable-pager`, `--no-color`, `--autocompletion` и другие.
+
+
+> `idp openid|ldap` сейчас добавлены как placeholder-команды (возвращают `not implemented`) для совместимости CLI, полноценная интеграция с MinIO admin API будет отдельным этапом.

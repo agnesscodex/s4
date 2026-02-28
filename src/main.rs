@@ -75,6 +75,17 @@ enum EventCommand {
 }
 
 #[derive(Debug)]
+enum IdpKind {
+    OpenId,
+    Ldap,
+}
+
+#[derive(Debug)]
+struct IdpCommand {
+    kind: IdpKind,
+}
+
+#[derive(Debug)]
 struct Endpoint {
     scheme: String,
     host: String,
@@ -340,6 +351,7 @@ fn handle_s3_command(
         && command != "cors"
         && command != "encrypt"
         && command != "event"
+        && command != "idp"
         && args.len() <= target_idx
     {
         return Err(format!("usage: s4 {command} ..."));
@@ -454,6 +466,11 @@ fn handle_s3_command(
     if command == "event" {
         let event_cmd = parse_event_args(args)?;
         return cmd_event(config, event_cmd, json, debug);
+    }
+
+    if command == "idp" {
+        let idp_cmd = parse_idp_args(args)?;
+        return cmd_idp(idp_cmd, json);
     }
 
     if command == "sync" || command == "mirror" {
@@ -587,6 +604,35 @@ fn handle_s3_command(
         }
         _ => Err(format!("unsupported command: {command}")),
     }
+}
+
+fn parse_idp_args(args: &[String]) -> Result<IdpCommand, String> {
+    if args.len() < 2 {
+        return Err("usage: s4 idp <openid|ldap> ...".to_string());
+    }
+    let kind = match args[1].as_str() {
+        "openid" => IdpKind::OpenId,
+        "ldap" => IdpKind::Ldap,
+        "help" | "h" => return Err("usage: s4 idp <openid|ldap> ...".to_string()),
+        other => return Err(format!("unknown idp subcommand: {other}")),
+    };
+    Ok(IdpCommand { kind })
+}
+
+fn cmd_idp(cmd: IdpCommand, json: bool) -> Result<(), String> {
+    let provider = match cmd.kind {
+        IdpKind::OpenId => "openid",
+        IdpKind::Ldap => "ldap",
+    };
+    if json {
+        println!(
+            "{{\"status\":\"not_implemented\",\"command\":\"idp\",\"provider\":\"{}\",\"message\":\"idp management is not implemented in this build\"}}",
+            provider
+        );
+    } else {
+        println!("idp {} is not implemented in this build", provider);
+    }
+    Ok(())
 }
 
 fn parse_cors_args(args: &[String]) -> Result<CorsCommand, String> {
@@ -2373,6 +2419,7 @@ COMMANDS:
   cors       manage bucket CORS configuration (set/get/remove)
   encrypt    manage bucket encryption config (set/clear/info)
   event      manage bucket notifications (add/remove/list)
+  idp        manage identity providers (openid/ldap) [placeholder]
   sync       sync objects from source bucket/prefix to destination
   mirror     alias for sync (mc-compatible naming)
   cp         copy object(s) between local and S3
@@ -2402,10 +2449,10 @@ FLAGS:
 #[cfg(test)]
 mod tests {
     use super::{
-        AliasConfig, AppConfig, CorsCommand, EncryptCommand, EventCommand,
+        AliasConfig, AppConfig, CorsCommand, EncryptCommand, EventCommand, IdpKind,
         build_complete_multipart_xml, extract_tag_values, is_excluded, looks_ready_xml,
         parse_config, parse_cors_args, parse_encrypt_args, parse_event_args, parse_globals,
-        parse_human_duration, parse_sync_args, parse_target, serialize_config,
+        parse_human_duration, parse_idp_args, parse_sync_args, parse_target, serialize_config,
         sync_destination_key, uri_encode_path, uri_encode_query_component, wildcard_match,
         xml_unescape,
     };
@@ -2659,6 +2706,26 @@ mod tests {
                 assert!(force);
             }
             _ => panic!("expected event remove"),
+        }
+    }
+
+    #[test]
+    fn parse_idp_args_openid_works() {
+        let args = vec!["idp".to_string(), "openid".to_string()];
+        let parsed = parse_idp_args(&args).expect("idp args should parse");
+        match parsed.kind {
+            IdpKind::OpenId => {}
+            _ => panic!("expected openid"),
+        }
+    }
+
+    #[test]
+    fn parse_idp_args_ldap_works() {
+        let args = vec!["idp".to_string(), "ldap".to_string()];
+        let parsed = parse_idp_args(&args).expect("idp args should parse");
+        match parsed.kind {
+            IdpKind::Ldap => {}
+            _ => panic!("expected ldap"),
         }
     }
 
