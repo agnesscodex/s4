@@ -1386,16 +1386,45 @@ fn cmd_retention(
                 .ok_or_else(|| format!("unknown alias: {}", target.alias))?;
             let bucket = req_bucket(&target, "retention clear")?;
             let key = req_key(&target, "retention clear")?;
-            s3_request(
+
+            // S3/MinIO clear path is PUT ObjectRetention update, not DELETE.
+            let now_out = Command::new("python3")
+                .arg("-c")
+                .arg("import datetime; print(datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'))")
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !now_out.status.success() {
+                return Err(format!(
+                    "failed to produce retention clear timestamp: {}",
+                    String::from_utf8_lossy(&now_out.stderr).trim()
+                ));
+            }
+            let retain_until = String::from_utf8_lossy(&now_out.stdout).trim().to_string();
+            let body = format!(
+                "<Retention><Mode>GOVERNANCE</Mode><RetainUntilDate>{}</RetainUntilDate></Retention>",
+                retain_until
+            );
+            let temp =
+                env::temp_dir().join(format!("s4-retention-{}-clear.xml", std::process::id()));
+            fs::write(&temp, body).map_err(|e| e.to_string())?;
+            let md5 = content_md5_header(&temp)?;
+            let headers = vec![
+                format!("Content-MD5: {}", md5),
+                "x-amz-bypass-governance-retention: true".to_string(),
+            ];
+            let res = s3_request_with_headers(
                 alias,
-                "DELETE",
+                "PUT",
                 &bucket,
                 Some(&key),
                 "retention",
+                Some(&temp),
                 None,
-                None,
+                &headers,
                 debug,
-            )?;
+            );
+            let _ = fs::remove_file(&temp);
+            res?;
             if json {
                 println!(
                     "{{\"status\":\"ok\",\"command\":\"retention clear\",\"bucket\":\"{}\",\"key\":\"{}\"}}",
