@@ -1676,11 +1676,12 @@ fn s3_request_bytes_with_headers(
         uri_path = "/".to_string();
     }
 
+    let canonical_query = normalize_sigv4_query(query);
     let payload_hash = payload_hash(upload_file)?;
     let sign = sign_v4(
         method,
         &uri_path,
-        query,
+        &canonical_query,
         &endpoint.host,
         &alias.region,
         &alias.access_key,
@@ -1689,9 +1690,9 @@ fn s3_request_bytes_with_headers(
     )?;
 
     let mut url = format!("{}://{}{}", endpoint.scheme, endpoint.host, uri_path);
-    if !query.is_empty() {
+    if !canonical_query.is_empty() {
         url.push('?');
-        url.push_str(query);
+        url.push_str(&canonical_query);
     }
 
     let ts = SystemTime::now()
@@ -2644,6 +2645,25 @@ fn req_key(target: &S3Target, cmd: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{cmd} requires alias/bucket/key"))
 }
 
+fn normalize_sigv4_query(query: &str) -> String {
+    if query.is_empty() {
+        return String::new();
+    }
+    query
+        .split('&')
+        .map(|part| {
+            if part.is_empty() {
+                String::new()
+            } else if part.contains('=') {
+                part.to_string()
+            } else {
+                format!("{}=", part)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
 fn s3_request(
     alias: &AliasConfig,
     method: &str,
@@ -2721,11 +2741,12 @@ fn s3_request_with_headers(
         uri_path = "/".to_string();
     }
 
+    let canonical_query = normalize_sigv4_query(query);
     let payload_hash = payload_hash(upload_file)?;
     let sign = sign_v4(
         method,
         &uri_path,
-        query,
+        &canonical_query,
         &endpoint.host,
         &alias.region,
         &alias.access_key,
@@ -2734,9 +2755,9 @@ fn s3_request_with_headers(
     )?;
 
     let mut url = format!("{}://{}{}", endpoint.scheme, endpoint.host, uri_path);
-    if !query.is_empty() {
+    if !canonical_query.is_empty() {
         url.push('?');
-        url.push_str(query);
+        url.push_str(&canonical_query);
     }
 
     let mut cmd = Command::new("curl");
@@ -3367,12 +3388,12 @@ mod tests {
     use super::{
         AliasConfig, AppConfig, CorsCommand, EncryptCommand, EventCommand, IdpKind, IlmKind,
         LegalHoldCommand, ReplicateSubcommand, RetentionCommand, build_complete_multipart_xml,
-        build_select_request_xml, extract_tag_values, is_excluded, looks_ready_xml, parse_config,
-        parse_cors_args, parse_encrypt_args, parse_event_args, parse_event_stream_records,
-        parse_globals, parse_human_duration, parse_idp_args, parse_ilm_args, parse_legalhold_args,
-        parse_replicate_args, parse_retention_args, parse_sql_args, parse_sync_args, parse_target,
-        serialize_config, sync_destination_key, uri_encode_path, uri_encode_query_component,
-        wildcard_match, xml_unescape,
+        build_select_request_xml, extract_tag_values, is_excluded, looks_ready_xml,
+        normalize_sigv4_query, parse_config, parse_cors_args, parse_encrypt_args, parse_event_args,
+        parse_event_stream_records, parse_globals, parse_human_duration, parse_idp_args,
+        parse_ilm_args, parse_legalhold_args, parse_replicate_args, parse_retention_args,
+        parse_sql_args, parse_sync_args, parse_target, serialize_config, sync_destination_key,
+        uri_encode_path, uri_encode_query_component, wildcard_match, xml_unescape,
     };
     use std::collections::BTreeMap;
 
@@ -3452,6 +3473,16 @@ mod tests {
             build_complete_multipart_xml(&[(1, "etag-1".to_string()), (2, "etag-2".to_string())]);
         assert!(xml.contains("<PartNumber>1</PartNumber>"));
         assert!(xml.contains("<ETag>\"etag-2\"</ETag>"));
+    }
+
+    #[test]
+    fn normalize_sigv4_query_adds_empty_values_for_subresources() {
+        assert_eq!(normalize_sigv4_query("cors"), "cors=");
+        assert_eq!(normalize_sigv4_query("uploads"), "uploads=");
+        assert_eq!(
+            normalize_sigv4_query("list-type=2&prefix=a"),
+            "list-type=2&prefix=a"
+        );
     }
 
     #[test]
