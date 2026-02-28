@@ -135,6 +135,20 @@ cmp -s "$LH_LOCAL" "$LH_GOT"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$LH_BUCKET/lh.txt"
 target/debug/s4 -C "$CFG_DIR" rb "ci/$LH_BUCKET"
 
+# replicate coverage (placeholder behavior)
+if target/debug/s4 -C "$CFG_DIR" replicate ls "ci/$SRC_BUCKET" > "$WORKDIR/replicate-ls.out"; then
+  rg -q "not implemented" "$WORKDIR/replicate-ls.out"
+else
+  echo "[ci] replicate ls command unexpectedly failed" >&2
+  exit 1
+fi
+if target/debug/s4 -C "$CFG_DIR" replicate backlog "ci/$SRC_BUCKET" > "$WORKDIR/replicate-backlog.out"; then
+  rg -q "not implemented" "$WORKDIR/replicate-backlog.out"
+else
+  echo "[ci] replicate backlog command unexpectedly failed" >&2
+  exit 1
+fi
+
 # global flags coverage: resolve/custom header/limits
 EP_HOSTPORT="${S4_E2E_ENDPOINT#http://}"
 EP_HOSTPORT="${EP_HOSTPORT#https://}"

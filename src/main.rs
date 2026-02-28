@@ -105,6 +105,25 @@ enum LegalHoldCommand {
 }
 
 #[derive(Debug)]
+enum ReplicateSubcommand {
+    Add,
+    Update,
+    List,
+    Status,
+    Resync,
+    Export,
+    Import,
+    Remove,
+    Backlog,
+}
+
+#[derive(Debug)]
+struct ReplicateCommand {
+    subcommand: ReplicateSubcommand,
+    target: Option<S3Target>,
+}
+
+#[derive(Debug)]
 struct Endpoint {
     scheme: String,
     host: String,
@@ -373,6 +392,7 @@ fn handle_s3_command(
         && command != "idp"
         && command != "ilm"
         && command != "legalhold"
+        && command != "replicate"
         && command != "mb"
         && args.len() <= target_idx
     {
@@ -540,6 +560,11 @@ fn handle_s3_command(
     if command == "legalhold" {
         let lh_cmd = parse_legalhold_args(args)?;
         return cmd_legalhold(config, lh_cmd, json, debug);
+    }
+
+    if command == "replicate" {
+        let rep_cmd = parse_replicate_args(args)?;
+        return cmd_replicate(rep_cmd, json);
     }
 
     if command == "sync" || command == "mirror" {
@@ -1177,6 +1202,58 @@ fn cmd_legalhold(
             Ok(())
         }
     }
+}
+
+fn parse_replicate_args(args: &[String]) -> Result<ReplicateCommand, String> {
+    if args.len() < 2 {
+        return Err("usage: s4 replicate <add|update|list|ls|status|resync|export|import|remove|rm|backlog> [target]".to_string());
+    }
+    let subcommand = match args[1].as_str() {
+        "add" => ReplicateSubcommand::Add,
+        "update" => ReplicateSubcommand::Update,
+        "list" | "ls" => ReplicateSubcommand::List,
+        "status" => ReplicateSubcommand::Status,
+        "resync" => ReplicateSubcommand::Resync,
+        "export" => ReplicateSubcommand::Export,
+        "import" => ReplicateSubcommand::Import,
+        "remove" | "rm" => ReplicateSubcommand::Remove,
+        "backlog" => ReplicateSubcommand::Backlog,
+        "help" | "h" => return Err("usage: s4 replicate <add|update|list|ls|status|resync|export|import|remove|rm|backlog> [target]".to_string()),
+        other => return Err(format!("unknown replicate subcommand: {other}")),
+    };
+    let target = args.get(2).map(|v| parse_target(v)).transpose()?;
+    Ok(ReplicateCommand { subcommand, target })
+}
+
+fn cmd_replicate(cmd: ReplicateCommand, json: bool) -> Result<(), String> {
+    let sub = match cmd.subcommand {
+        ReplicateSubcommand::Add => "add",
+        ReplicateSubcommand::Update => "update",
+        ReplicateSubcommand::List => "list",
+        ReplicateSubcommand::Status => "status",
+        ReplicateSubcommand::Resync => "resync",
+        ReplicateSubcommand::Export => "export",
+        ReplicateSubcommand::Import => "import",
+        ReplicateSubcommand::Remove => "remove",
+        ReplicateSubcommand::Backlog => "backlog",
+    };
+    if json {
+        println!(
+            "{{\"status\":\"not_implemented\",\"command\":\"replicate\",\"subcommand\":\"{}\",\"message\":\"replication management is not implemented in this build\"}}",
+            sub
+        );
+    } else {
+        let target = cmd
+            .target
+            .as_ref()
+            .and_then(|t| t.bucket.as_ref().map(|b| format!("{}/{}", t.alias, b)))
+            .unwrap_or_else(|| "<no-target>".to_string());
+        println!(
+            "replicate {} is not implemented in this build (target: {})",
+            sub, target
+        );
+    }
+    Ok(())
 }
 
 fn parse_sync_args(args: &[String]) -> Result<(SyncOptions, S3Target, S3Target), String> {
@@ -2630,6 +2707,7 @@ COMMANDS:
   mb         make bucket
   rb         remove bucket
   legalhold  manage legal hold for object(s) (set/clear/info)
+  replicate  manage server-side bucket replication [placeholder]
   put        upload object
   get        download object
   rm         remove object
@@ -2673,11 +2751,12 @@ NOTE:
 mod tests {
     use super::{
         AliasConfig, AppConfig, CorsCommand, EncryptCommand, EventCommand, IdpKind, IlmKind,
-        LegalHoldCommand, build_complete_multipart_xml, extract_tag_values, is_excluded,
-        looks_ready_xml, parse_config, parse_cors_args, parse_encrypt_args, parse_event_args,
-        parse_globals, parse_human_duration, parse_idp_args, parse_ilm_args, parse_legalhold_args,
-        parse_sync_args, parse_target, serialize_config, sync_destination_key, uri_encode_path,
-        uri_encode_query_component, wildcard_match, xml_unescape,
+        LegalHoldCommand, ReplicateSubcommand, build_complete_multipart_xml, extract_tag_values,
+        is_excluded, looks_ready_xml, parse_config, parse_cors_args, parse_encrypt_args,
+        parse_event_args, parse_globals, parse_human_duration, parse_idp_args, parse_ilm_args,
+        parse_legalhold_args, parse_replicate_args, parse_sync_args, parse_target,
+        serialize_config, sync_destination_key, uri_encode_path, uri_encode_query_component,
+        wildcard_match, xml_unescape,
     };
     use std::collections::BTreeMap;
 
@@ -3005,6 +3084,33 @@ mod tests {
                 assert_eq!(target.key.as_deref(), Some("k"));
             }
             _ => panic!("expected legalhold info"),
+        }
+    }
+
+    #[test]
+    fn parse_replicate_args_list_alias_works() {
+        let args = vec![
+            "replicate".to_string(),
+            "ls".to_string(),
+            "a/bucket".to_string(),
+        ];
+        let parsed = parse_replicate_args(&args).expect("replicate args should parse");
+        match parsed.subcommand {
+            ReplicateSubcommand::List => {}
+            _ => panic!("expected list"),
+        }
+        let target = parsed.target.expect("target expected");
+        assert_eq!(target.alias, "a");
+        assert_eq!(target.bucket.as_deref(), Some("bucket"));
+    }
+
+    #[test]
+    fn parse_replicate_args_backlog_works() {
+        let args = vec!["replicate".to_string(), "backlog".to_string()];
+        let parsed = parse_replicate_args(&args).expect("replicate args should parse");
+        match parsed.subcommand {
+            ReplicateSubcommand::Backlog => {}
+            _ => panic!("expected backlog"),
         }
     }
 
