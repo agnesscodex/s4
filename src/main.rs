@@ -54,6 +54,13 @@ struct SyncOptions {
 }
 
 #[derive(Debug)]
+enum CorsCommand {
+    Set { target: S3Target, file: PathBuf },
+    Get { target: S3Target },
+    Remove { target: S3Target },
+}
+
+#[derive(Debug)]
 struct Endpoint {
     scheme: String,
     host: String,
@@ -133,7 +140,7 @@ fn run() -> Result<(), String> {
     match rest[0].as_str() {
         "alias" => handle_alias(&rest[1..], &mut config, &config_path, opts.json),
         "ls" | "mb" | "rb" | "put" | "get" | "rm" | "stat" | "cat" | "sync" | "mirror" | "cp"
-        | "mv" | "find" | "tree" | "head" | "pipe" | "ping" | "ready" => {
+        | "mv" | "find" | "tree" | "head" | "pipe" | "ping" | "ready" | "cors" => {
             handle_s3_command(&rest, &config, opts.json, opts.debug)
         }
         _ => Err(format!("unknown command: {}", rest[0])),
@@ -317,6 +324,7 @@ fn handle_s3_command(
         && command != "pipe"
         && command != "ping"
         && command != "ready"
+        && command != "cors"
         && args.len() <= target_idx
     {
         return Err(format!("usage: s4 {command} ..."));
@@ -416,6 +424,11 @@ fn handle_s3_command(
             .get(&target.alias)
             .ok_or_else(|| format!("unknown alias: {}", target.alias))?;
         return cmd_ready(&target.alias, alias, json, debug);
+    }
+
+    if command == "cors" {
+        let cors_cmd = parse_cors_args(args)?;
+        return cmd_cors(config, cors_cmd, json, debug);
     }
 
     if command == "sync" || command == "mirror" {
@@ -543,10 +556,105 @@ fn handle_s3_command(
             Ok(())
         }
         "sync" | "mirror" => unreachable!(),
-        "cp" | "mv" | "find" | "tree" | "head" | "pipe" | "ping" | "ready" => {
+        "cp" | "mv" | "find" | "tree" | "head" | "pipe" | "ping" | "ready" | "cors" => {
             unreachable!()
         }
         _ => Err(format!("unsupported command: {command}")),
+    }
+}
+
+fn parse_cors_args(args: &[String]) -> Result<CorsCommand, String> {
+    if args.len() < 3 {
+        return Err("usage: s4 cors <set|get|remove> ...".to_string());
+    }
+    match args[1].as_str() {
+        "set" => {
+            if args.len() < 4 {
+                return Err("usage: s4 cors set <alias/bucket> <cors_xml_file>".to_string());
+            }
+            let target = parse_target(&args[2])?;
+            let file = PathBuf::from(&args[3]);
+            Ok(CorsCommand::Set { target, file })
+        }
+        "get" => {
+            let target = parse_target(&args[2])?;
+            Ok(CorsCommand::Get { target })
+        }
+        "remove" => {
+            let target = parse_target(&args[2])?;
+            Ok(CorsCommand::Remove { target })
+        }
+        "help" | "h" => Err("usage: s4 cors <set|get|remove> ...".to_string()),
+        other => Err(format!("unknown cors subcommand: {other}")),
+    }
+}
+
+fn cmd_cors(config: &AppConfig, cmd: CorsCommand, json: bool, debug: bool) -> Result<(), String> {
+    match cmd {
+        CorsCommand::Set { target, file } => {
+            if !file.exists() {
+                return Err(format!("cors file not found: {}", file.display()));
+            }
+            let alias = config
+                .aliases
+                .get(&target.alias)
+                .ok_or_else(|| format!("unknown alias: {}", target.alias))?;
+            let bucket = req_bucket(&target, "cors set")?;
+            s3_request(
+                alias,
+                "PUT",
+                &bucket,
+                None,
+                "cors",
+                Some(&file),
+                None,
+                debug,
+            )?;
+            if json {
+                println!(
+                    "{{\"status\":\"ok\",\"command\":\"cors set\",\"bucket\":\"{}\"}}",
+                    escape_json(&bucket)
+                );
+            } else {
+                println!("CORS set for bucket '{}'", bucket);
+            }
+            Ok(())
+        }
+        CorsCommand::Get { target } => {
+            let alias = config
+                .aliases
+                .get(&target.alias)
+                .ok_or_else(|| format!("unknown alias: {}", target.alias))?;
+            let bucket = req_bucket(&target, "cors get")?;
+            let body = s3_request(alias, "GET", &bucket, None, "cors", None, None, debug)?;
+            if json {
+                println!(
+                    "{{\"bucket\":\"{}\",\"cors\":\"{}\"}}",
+                    escape_json(&bucket),
+                    escape_json(&body)
+                );
+            } else {
+                print!("{}", body);
+            }
+            Ok(())
+        }
+        CorsCommand::Remove { target } => {
+            let alias = config
+                .aliases
+                .get(&target.alias)
+                .ok_or_else(|| format!("unknown alias: {}", target.alias))?;
+            let bucket = req_bucket(&target, "cors remove")?;
+            s3_request(alias, "DELETE", &bucket, None, "cors", None, None, debug)?;
+            if json {
+                println!(
+                    "{{\"status\":\"ok\",\"command\":\"cors remove\",\"bucket\":\"{}\"}}",
+                    escape_json(&bucket)
+                );
+            } else {
+                println!("CORS removed for bucket '{}'", bucket);
+            }
+            Ok(())
+        }
     }
 }
 
@@ -2005,6 +2113,7 @@ COMMANDS:
   rm         remove object
   stat       object metadata (raw headers)
   cat        print object content
+  cors       manage bucket CORS configuration (set/get/remove)
   sync       sync objects from source bucket/prefix to destination
   mirror     alias for sync (mc-compatible naming)
   cp         copy object(s) between local and S3
@@ -2034,10 +2143,11 @@ FLAGS:
 #[cfg(test)]
 mod tests {
     use super::{
-        AliasConfig, AppConfig, build_complete_multipart_xml, extract_tag_values, is_excluded,
-        looks_ready_xml, parse_config, parse_globals, parse_human_duration, parse_sync_args,
-        parse_target, serialize_config, sync_destination_key, uri_encode_path,
-        uri_encode_query_component, wildcard_match, xml_unescape,
+        AliasConfig, AppConfig, CorsCommand, build_complete_multipart_xml, extract_tag_values,
+        is_excluded, looks_ready_xml, parse_config, parse_cors_args, parse_globals,
+        parse_human_duration, parse_sync_args, parse_target, serialize_config,
+        sync_destination_key, uri_encode_path, uri_encode_query_component, wildcard_match,
+        xml_unescape,
     };
     use std::collections::BTreeMap;
 
@@ -2180,6 +2290,42 @@ mod tests {
         assert!(!opts.watch);
         assert_eq!(opts.newer_than, Some(864000));
         assert_eq!(opts.older_than, Some(3600));
+    }
+
+    #[test]
+    fn parse_cors_args_set_works() {
+        let args = vec![
+            "cors".to_string(),
+            "set".to_string(),
+            "a/bucket".to_string(),
+            "cors.xml".to_string(),
+        ];
+        let parsed = parse_cors_args(&args).expect("cors args should parse");
+        match parsed {
+            CorsCommand::Set { target, file } => {
+                assert_eq!(target.alias, "a");
+                assert_eq!(target.bucket.as_deref(), Some("bucket"));
+                assert_eq!(file.to_string_lossy(), "cors.xml");
+            }
+            _ => panic!("expected cors set"),
+        }
+    }
+
+    #[test]
+    fn parse_cors_args_get_works() {
+        let args = vec![
+            "cors".to_string(),
+            "get".to_string(),
+            "a/bucket".to_string(),
+        ];
+        let parsed = parse_cors_args(&args).expect("cors args should parse");
+        match parsed {
+            CorsCommand::Get { target } => {
+                assert_eq!(target.alias, "a");
+                assert_eq!(target.bucket.as_deref(), Some("bucket"));
+            }
+            _ => panic!("expected cors get"),
+        }
     }
 
     #[test]

@@ -23,6 +23,12 @@ s4 put hello.txt local/test-bucket/hello.txt
 s4 cat local/test-bucket/hello.txt
 s4 get local/test-bucket/hello.txt ./downloaded.txt
 s4 stat local/test-bucket/hello.txt
+
+# cors
+s4 cors set local/test-bucket ./cors.xml
+s4 cors get local/test-bucket
+s4 cors remove local/test-bucket
+
 s4 rm local/test-bucket/hello.txt
 s4 rb local/test-bucket
 
@@ -135,7 +141,7 @@ GITHUB_TOKEN=... ./scripts/monitor_ci.sh --wait --rerun-failed --sha "$(git rev-
 
 ## Покрытие команд mc vs s4
 
-На текущем этапе в `s4` реализованы: `alias`, `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `sync`, `mirror`, `cp`, `mv`, `find`, `tree`, `head`, `pipe`, `ping`, `ready`.
+На текущем этапе в `s4` реализованы: `alias`, `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `cors`, `sync`, `mirror`, `cp`, `mv`, `find`, `tree`, `head`, `pipe`, `ping`, `ready`.
 
 Остальные команды из полного списка `mc` (например `admin`, `anonymous`, `watch`, `replicate`, `sql`, `tag`, и т.д.) пока **не реализованы** и требуют отдельных итераций.
 

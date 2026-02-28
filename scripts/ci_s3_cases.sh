@@ -36,6 +36,24 @@ target/debug/s4 -C "$CFG_DIR" alias set ci "$S4_E2E_ENDPOINT" "$S4_E2E_ACCESS_KE
 target/debug/s4 -C "$CFG_DIR" mb "ci/$SRC_BUCKET"
 target/debug/s4 -C "$CFG_DIR" mb "ci/$DST_BUCKET"
 
+# cors coverage
+CORS_XML="$WORKDIR/cors.xml"
+cat > "$CORS_XML" <<'EOF'
+<CORSConfiguration>
+  <CORSRule>
+    <AllowedOrigin>*</AllowedOrigin>
+    <AllowedMethod>GET</AllowedMethod>
+    <AllowedMethod>PUT</AllowedMethod>
+    <AllowedHeader>*</AllowedHeader>
+  </CORSRule>
+</CORSConfiguration>
+EOF
+
+target/debug/s4 -C "$CFG_DIR" cors set "ci/$SRC_BUCKET" "$CORS_XML"
+target/debug/s4 -C "$CFG_DIR" cors get "ci/$SRC_BUCKET" > "$WORKDIR/cors-get.out"
+rg -q "CORSConfiguration|CORSRule" "$WORKDIR/cors-get.out"
+target/debug/s4 -C "$CFG_DIR" cors remove "ci/$SRC_BUCKET"
+
 # global flags coverage: resolve/custom header/limits
 EP_HOSTPORT="${S4_E2E_ENDPOINT#http://}"
 EP_HOSTPORT="${EP_HOSTPORT#https://}"
