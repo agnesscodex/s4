@@ -89,7 +89,7 @@ fn run() -> Result<(), String> {
 
     match rest[0].as_str() {
         "alias" => handle_alias(&rest[1..], &mut config, &config_path, opts.json),
-        "ls" | "mb" | "rb" | "put" | "get" | "rm" | "stat" | "cat" | "sync" => {
+        "ls" | "mb" | "rb" | "put" | "get" | "rm" | "stat" | "cat" | "sync" | "mirror" => {
             handle_s3_command(&rest, &config, opts.json, opts.debug)
         }
         _ => Err(format!("unknown command: {}", rest[0])),
@@ -243,14 +243,14 @@ fn handle_s3_command(
 ) -> Result<(), String> {
     let command = &args[0];
     let target_idx = if command == "put" { 2 } else { 1 };
-    if command != "sync" && args.len() <= target_idx {
+    if command != "sync" && command != "mirror" && args.len() <= target_idx {
         return Err(format!("usage: s4 {command} ..."));
     }
 
-    if command == "sync" {
+    if command == "sync" || command == "mirror" {
         if args.len() < 3 {
             return Err(
-                "usage: s4 sync <src_alias/bucket[/prefix]> <dst_alias/bucket[/prefix]>"
+                "usage: s4 sync|mirror <src_alias/bucket[/prefix]> <dst_alias/bucket[/prefix]>"
                     .to_string(),
             );
         }
@@ -387,7 +387,7 @@ fn handle_s3_command(
             print!("{}", body);
             Ok(())
         }
-        "sync" => unreachable!(),
+        "sync" | "mirror" => unreachable!(),
         _ => Err(format!("unsupported command: {command}")),
     }
 }
@@ -930,7 +930,7 @@ fn print_status(json: bool, field: &str, value: &str) {
 
 fn print_help() {
     println!(
-        "s4 - S3 client utility in Rust\n\nUSAGE:\n  s4 [FLAGS] COMMAND [ARGS]\n\nCOMMANDS:\n  alias      manage aliases in local config\n  ls         list buckets/objects\n  mb         make bucket\n  rb         remove bucket\n  put        upload object\n  get        download object\n  rm         remove object\n  stat       object metadata (raw headers)\n  cat        print object content\n  sync       sync objects from source bucket/prefix to destination\n  version    print version\n\nFLAGS:\n  -C, --config-dir <DIR>\n  --json\n  --debug\n  --insecure\n  -h, --help\n  -v, --version"
+        "s4 - S3 client utility in Rust\n\nUSAGE:\n  s4 [FLAGS] COMMAND [ARGS]\n\nCOMMANDS:\n  alias      manage aliases in local config\n  ls         list buckets/objects\n  mb         make bucket\n  rb         remove bucket\n  put        upload object\n  get        download object\n  rm         remove object\n  stat       object metadata (raw headers)\n  cat        print object content\n  sync       sync objects from source bucket/prefix to destination\n  mirror     alias for sync (mc-compatible naming)\n  version    print version\n\nFLAGS:\n  -C, --config-dir <DIR>\n  --json\n  --debug\n  --insecure\n  -h, --help\n  -v, --version"
     );
 }
 

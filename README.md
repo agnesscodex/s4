@@ -6,7 +6,7 @@
 
 - Глобальные флаги: `-C/--config-dir`, `--json`, `--debug`, `--insecure`.
 - Управление alias: `alias set|ls|rm`.
-- S3-команды: `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `sync`.
+- S3-команды: `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `sync`, `mirror` (alias к `sync`).
 - AWS SigV4 подпись запросов реализована через встроенный Python helper (`python3`) и HTTP-вызовы через `curl`.
 - Формат конфига: `~/.s4/config.toml`.
 
@@ -27,6 +27,8 @@ s4 rb local/test-bucket
 
 # синхронизация (аналог mc mirror)
 s4 sync local/source-bucket local/destination-bucket
+# или в стиле mc
+s4 mirror local/source-bucket local/destination-bucket
 ```
 
 
@@ -59,7 +61,7 @@ S4_E2E_PATH_STYLE=1 \
 
 1. `cargo fmt --all --check`
 2. `cargo test --all-targets`
-3. Интеграционные S3-кейсы против локального MinIO (`scripts/ci_s3_cases.sh`), включая `sync` (аналог `mc mirror`).
+3. Интеграционные S3-кейсы против локального MinIO (`scripts/ci_s3_cases.sh`), включая `sync` и `mirror` (mc-совместимый alias).
 4. На `push` в `main` — интеграционные S3-кейсы против удалённого endpoint из GitHub Secrets.
 
 ### Секреты для remote S3 job
@@ -90,3 +92,10 @@ GITHUB_TOKEN=... ./scripts/monitor_ci.sh --wait --rerun-failed --sha "$(git rev-
 ```
 
 Если `GITHUB_REPOSITORY` не задан, скрипт сам определит `owner/repo` из `git remote origin`.
+
+
+## Покрытие команд mc vs s4
+
+На текущем этапе в `s4` реализованы: `alias`, `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `sync`, `mirror`.
+
+Остальные команды из полного списка `mc` (например `admin`, `anonymous`, `cp`, `mv`, `find`, `tree`, `watch`, `replicate`, и т.д.) пока **не реализованы** и требуют отдельных итераций.

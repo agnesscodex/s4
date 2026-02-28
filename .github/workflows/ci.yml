@@ -56,7 +56,7 @@ jobs:
           docker logs minio || true
           exit 1
 
-      - name: Run S3 cases against local MinIO (CRUD + sync)
+      - name: Run S3 cases against local MinIO (CRUD + sync + mirror)
         env:
           S4_E2E_ENDPOINT: http://127.0.0.1:9000
           S4_E2E_ACCESS_KEY: minio
@@ -95,7 +95,7 @@ jobs:
           test -n "$S3_ACCESS_KEY_ID" || (echo "S3_ACCESS_KEY_ID secret is missing" >&2; exit 1)
           test -n "$S3_SECRET_ACCESS_KEY" || (echo "S3_SECRET_ACCESS_KEY secret is missing" >&2; exit 1)
 
-      - name: Run S3 cases against remote endpoint (CRUD + sync)
+      - name: Run S3 cases against remote endpoint (CRUD + sync + mirror)
         env:
           S4_E2E_ENDPOINT: http://${{ secrets.S3_ENDPOINT }}:${{ secrets.S3_ENDPOINT_PORT }}
           S4_E2E_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY_ID }}
