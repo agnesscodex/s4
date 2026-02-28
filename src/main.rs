@@ -232,7 +232,9 @@ fn run() -> Result<(), String> {
         "alias" => handle_alias(&rest[1..], &mut config, &config_path, opts.json),
         "ls" | "mb" | "rb" | "put" | "get" | "rm" | "stat" | "cat" | "sync" | "mirror" | "cp"
         | "mv" | "find" | "tree" | "head" | "pipe" | "ping" | "ready" | "cors" | "encrypt"
-        | "event" => handle_s3_command(&rest, &config, opts.json, opts.debug),
+        | "event" | "legalhold" | "retention" | "sql" | "idp" | "ilm" | "replicate" => {
+            handle_s3_command(&rest, &config, opts.json, opts.debug)
+        }
         _ => Err(format!("unknown command: {}", rest[0])),
     }
 }

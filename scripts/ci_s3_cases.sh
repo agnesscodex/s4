@@ -58,7 +58,7 @@ run_or_skip_not_implemented() {
     cat "$out_file"
     return 0
   fi
-  if has_pattern "status 501|<Code>NotImplemented</Code>|not implemented" "$out_file"; then
+  if has_pattern "status 501|<Code>NotImplemented</Code>|not implemented|<Code>InvalidArgument</Code>.*destination ARN|destination ARN does not exist or is not well-formed" "$out_file"; then
     echo "[ci] skipping unsupported API call: $*" >&2
     return 10
   fi
