@@ -156,6 +156,37 @@ else
   exit 1
 fi
 
+# unsupported mc command compatibility checks (must fail explicitly until implemented)
+expect_unknown_command() {
+  local cmd_name="$1"
+  local out_file="$WORKDIR/unsupported-${cmd_name}.out"
+  if target/debug/s4 -C "$CFG_DIR" "$cmd_name" >"$out_file" 2>&1; then
+    echo "[ci] expected unsupported command '$cmd_name' to fail" >&2
+    exit 1
+  fi
+  rg -q "unknown command|not implemented|usage:" "$out_file"
+}
+
+expect_unknown_command admin
+expect_unknown_command anonymous
+expect_unknown_command batch
+expect_unknown_command diff
+expect_unknown_command du
+expect_unknown_command od
+expect_unknown_command quota
+expect_unknown_command support
+expect_unknown_command share
+expect_unknown_command tag
+expect_unknown_command undo
+expect_unknown_command update
+expect_unknown_command watch
+expect_unknown_command license
+
+# version command coverage
+S4_VERSION_OUT="$WORKDIR/version.out"
+target/debug/s4 -C "$CFG_DIR" version > "$S4_VERSION_OUT"
+rg -q "s4 " "$S4_VERSION_OUT"
+
 # global flags coverage: resolve/custom header/limits
 EP_HOSTPORT="${S4_E2E_ENDPOINT#http://}"
 EP_HOSTPORT="${EP_HOSTPORT#https://}"
