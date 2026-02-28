@@ -68,6 +68,34 @@ target/debug/s4 -C "$CFG_DIR" get "ci/$DST_BUCKET/mirror-copy/2024/b.txt" "$OUT2
 cmp -s "$SRC1" "$OUT1"
 cmp -s "$SRC2" "$OUT2"
 
+# mirror/sync flags coverage: --dry-run should not copy
+DRYRUN_OUT="$WORKDIR/dryrun.out"
+target/debug/s4 -C "$CFG_DIR" mirror --dry-run "ci/$SRC_BUCKET/photos" "ci/$DST_BUCKET/dry-run" > "$DRYRUN_OUT"
+rg -q "dry-run: true" "$DRYRUN_OUT"
+if target/debug/s4 -C "$CFG_DIR" get "ci/$DST_BUCKET/dry-run/2024/a.txt" "$WORKDIR/dryrun-got.txt"; then
+  echo "[ci] dry-run unexpectedly copied object" >&2
+  exit 1
+fi
+
+# --exclude should skip matching keys
+EXCL_LOCAL="$WORKDIR/exclude.tmp"
+printf 'exclude-me-%s
+' "$TS" > "$EXCL_LOCAL"
+target/debug/s4 -C "$CFG_DIR" put "$EXCL_LOCAL" "ci/$SRC_BUCKET/photos/2024/exclude.tmp"
+target/debug/s4 -C "$CFG_DIR" sync --exclude "*.tmp" "ci/$SRC_BUCKET/photos" "ci/$DST_BUCKET/exclude-copy"
+if target/debug/s4 -C "$CFG_DIR" get "ci/$DST_BUCKET/exclude-copy/2024/exclude.tmp" "$WORKDIR/exclude-got.tmp"; then
+  echo "[ci] --exclude did not filter *.tmp" >&2
+  exit 1
+fi
+
+# --remove should delete extraneous object on destination
+target/debug/s4 -C "$CFG_DIR" cp "$SRC1" "ci/$DST_BUCKET/sync-copy/2024/extraneous.txt"
+target/debug/s4 -C "$CFG_DIR" sync --remove "ci/$SRC_BUCKET/photos" "ci/$DST_BUCKET/sync-copy"
+if target/debug/s4 -C "$CFG_DIR" get "ci/$DST_BUCKET/sync-copy/2024/extraneous.txt" "$WORKDIR/extraneous.txt"; then
+  echo "[ci] --remove did not clean extraneous object" >&2
+  exit 1
+fi
+
 # find/tree/head coverage
 target/debug/s4 -C "$CFG_DIR" find "ci/$SRC_BUCKET/photos" "2024" > "$WORKDIR/find.out"
 rg -q "photos/2024/a.txt|2024/a.txt" "$WORKDIR/find.out"
@@ -120,10 +148,13 @@ target/debug/s4 -C "$CFG_DIR" rm "ci/$SRC_BUCKET/mp/large.bin"
 
 target/debug/s4 -C "$CFG_DIR" rm "ci/$SRC_BUCKET/photos/2024/a.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$SRC_BUCKET/photos/2024/b.txt"
+target/debug/s4 -C "$CFG_DIR" rm "ci/$SRC_BUCKET/photos/2024/exclude.tmp"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/sync-copy/2024/a.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/sync-copy/2024/b.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/mirror-copy/2024/a.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/mirror-copy/2024/b.txt"
+target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/exclude-copy/2024/a.txt"
+target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/exclude-copy/2024/b.txt"
 
 target/debug/s4 -C "$CFG_DIR" rb "ci/$SRC_BUCKET"
 target/debug/s4 -C "$CFG_DIR" rb "ci/$DST_BUCKET"

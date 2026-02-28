@@ -53,6 +53,21 @@ s4 ready local
 
 
 > Примечание по лимитам: `--limit-upload` и `--limit-download` в текущей реализации передаются в `curl` как `--limit-rate` для upload/download-запросов соответственно.
+
+## Mirror/sync флаги (совместимость с `mc mirror`)
+
+Поддержано в `s4 mirror`/`s4 sync`:
+- `--dry-run`
+- `--remove`
+- `--exclude <glob>` (можно указывать несколько раз; поддерживаются `*` и `?`)
+- `--overwrite` (принимается для совместимости; текущее поведение и так перезаписывает целевые объекты)
+
+Пока **не реализовано** и возвращает явную ошибку `not implemented yet`:
+- `--watch/-w`, `--preserve/-a`, `--active-active`, `--disable-multipart`, `--exclude-bucket`,
+  `--exclude-storageclass`, `--older-than`, `--newer-than`, `--storage-class/--sc`, `--attr`,
+  `--monitoring-address`, `--retry`, `--summary`, `--skip-errors`, `--max-workers`, `--checksum`,
+  `--enc-c`, `--enc-kms`, `--enc-s3`, `--region` и другие специальные флаги `mc mirror`.
+
 ## Автоматизированный e2e
 
 Для полного smoke/e2e прогона добавлен скрипт `scripts/e2e.sh`.

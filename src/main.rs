@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::Read;
@@ -39,6 +39,14 @@ struct S3Target {
     alias: String,
     bucket: Option<String>,
     key: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct SyncOptions {
+    overwrite: bool,
+    dry_run: bool,
+    remove: bool,
+    excludes: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -407,15 +415,8 @@ fn handle_s3_command(
     }
 
     if command == "sync" || command == "mirror" {
-        if args.len() < 3 {
-            return Err(
-                "usage: s4 sync|mirror <src_alias/bucket[/prefix]> <dst_alias/bucket[/prefix]>"
-                    .to_string(),
-            );
-        }
-        let src = parse_target(&args[1])?;
-        let dst = parse_target(&args[2])?;
-        return cmd_sync(config, &src, &dst, json, debug);
+        let (sync_opts, src, dst) = parse_sync_args(args)?;
+        return cmd_sync(config, &src, &dst, &sync_opts, json, debug);
     }
 
     let target = parse_target(&args[target_idx])?;
@@ -545,10 +546,102 @@ fn handle_s3_command(
     }
 }
 
+fn parse_sync_args(args: &[String]) -> Result<(SyncOptions, S3Target, S3Target), String> {
+    if args.len() < 3 {
+        return Err(
+            "usage: s4 sync|mirror [FLAGS] <src_alias/bucket[/prefix]> <dst_alias/bucket[/prefix]>"
+                .to_string(),
+        );
+    }
+
+    let mut opts = SyncOptions::default();
+    let mut positional: Vec<&String> = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--overwrite" => {
+                opts.overwrite = true;
+                i += 1;
+            }
+            "--dry-run" => {
+                opts.dry_run = true;
+                i += 1;
+            }
+            "--remove" => {
+                opts.remove = true;
+                i += 1;
+            }
+            "--exclude" => {
+                let value = args.get(i + 1).ok_or("--exclude expects a value")?;
+                opts.excludes.push(value.to_string());
+                i += 2;
+            }
+            "--watch" | "-w" => {
+                return Err("sync/mirror flag not implemented yet: --watch/-w".to_string());
+            }
+            f if f.starts_with('-') => {
+                return Err(format!("sync/mirror flag not implemented yet: {f}"));
+            }
+            _ => {
+                positional.push(&args[i]);
+                i += 1;
+            }
+        }
+    }
+
+    if positional.len() != 2 {
+        return Err(
+            "usage: s4 sync|mirror [FLAGS] <src_alias/bucket[/prefix]> <dst_alias/bucket[/prefix]>"
+                .to_string(),
+        );
+    }
+
+    let src = parse_target(positional[0])?;
+    let dst = parse_target(positional[1])?;
+    Ok((opts, src, dst))
+}
+
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let p = pattern.as_bytes();
+    let t = text.as_bytes();
+    let mut pi = 0usize;
+    let mut ti = 0usize;
+    let mut star: Option<usize> = None;
+    let mut match_ti = 0usize;
+
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == b'?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == b'*' {
+            star = Some(pi);
+            pi += 1;
+            match_ti = ti;
+        } else if let Some(star_idx) = star {
+            pi = star_idx + 1;
+            match_ti += 1;
+            ti = match_ti;
+        } else {
+            return false;
+        }
+    }
+
+    while pi < p.len() && p[pi] == b'*' {
+        pi += 1;
+    }
+
+    pi == p.len()
+}
+
+fn is_excluded(key: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|p| wildcard_match(p, key))
+}
+
 fn cmd_sync(
     config: &AppConfig,
     source: &S3Target,
     destination: &S3Target,
+    options: &SyncOptions,
     json: bool,
     debug: bool,
 ) -> Result<(), String> {
@@ -567,40 +660,97 @@ fn cmd_sync(
     let dst_prefix = destination.key.clone().unwrap_or_default();
 
     let keys = list_object_keys(src_alias, &src_bucket, &src_prefix, debug)?;
-    let temp_root = env::temp_dir().join(format!("s4-sync-{}", std::process::id()));
-    fs::create_dir_all(&temp_root).map_err(|e| e.to_string())?;
+    let filtered_keys: Vec<String> = keys
+        .into_iter()
+        .filter(|k| !is_excluded(k, &options.excludes))
+        .collect();
 
     let mut copied = 0usize;
-    for (idx, key) in keys.iter().enumerate() {
-        let dest_key = sync_destination_key(key, &src_prefix, &dst_prefix);
-        let temp_file = temp_root.join(format!("obj-{idx}"));
-        s3_request(
-            src_alias,
-            "GET",
-            &src_bucket,
-            Some(key),
-            "",
-            None,
-            Some(&temp_file),
-            debug,
-        )?;
-        upload_file_to_s3(dst_alias, &dst_bucket, &dest_key, &temp_file, debug)?;
-        copied += 1;
+    let mut removed = 0usize;
+
+    if options.dry_run {
+        for key in &filtered_keys {
+            let dest_key = sync_destination_key(key, &src_prefix, &dst_prefix);
+            if !json {
+                println!(
+                    "[dry-run] copy {}/{} -> {}/{}",
+                    src_bucket, key, dst_bucket, dest_key
+                );
+            }
+            copied += 1;
+        }
+    } else {
+        let temp_root = env::temp_dir().join(format!("s4-sync-{}", std::process::id()));
+        fs::create_dir_all(&temp_root).map_err(|e| e.to_string())?;
+
+        for (idx, key) in filtered_keys.iter().enumerate() {
+            let dest_key = sync_destination_key(key, &src_prefix, &dst_prefix);
+            let temp_file = temp_root.join(format!("obj-{idx}"));
+            s3_request(
+                src_alias,
+                "GET",
+                &src_bucket,
+                Some(key),
+                "",
+                None,
+                Some(&temp_file),
+                debug,
+            )?;
+            upload_file_to_s3(dst_alias, &dst_bucket, &dest_key, &temp_file, debug)?;
+            copied += 1;
+        }
+
+        fs::remove_dir_all(&temp_root).ok();
     }
 
-    fs::remove_dir_all(&temp_root).ok();
+    if options.remove {
+        let dst_keys = list_object_keys(dst_alias, &dst_bucket, &dst_prefix, debug)?;
+        let expected: HashSet<String> = filtered_keys
+            .iter()
+            .map(|k| sync_destination_key(k, &src_prefix, &dst_prefix))
+            .collect();
+        for key in dst_keys {
+            if !expected.contains(&key) {
+                if options.dry_run {
+                    if !json {
+                        println!("[dry-run] remove {}/{}", dst_bucket, key);
+                    }
+                } else {
+                    s3_request(
+                        dst_alias,
+                        "DELETE",
+                        &dst_bucket,
+                        Some(&key),
+                        "",
+                        None,
+                        None,
+                        debug,
+                    )?;
+                }
+                removed += 1;
+            }
+        }
+    }
 
     if json {
         println!(
-            "{{\"status\":\"ok\",\"copied\":{},\"src\":\"{}\",\"dst\":\"{}\"}}",
+            "{{\"status\":\"ok\",\"copied\":{},\"removed\":{},\"dry_run\":{},\"src\":\"{}\",\"dst\":\"{}\"}}",
             copied,
+            removed,
+            options.dry_run,
             escape_json(&format!("{}/{}", source.alias, src_bucket)),
             escape_json(&format!("{}/{}", destination.alias, dst_bucket))
         );
     } else {
         println!(
-            "Synced {} object(s) from {}/{} to {}/{}",
-            copied, source.alias, src_bucket, destination.alias, dst_bucket
+            "Synced {} object(s) from {}/{} to {}/{} (removed: {}, dry-run: {})",
+            copied,
+            source.alias,
+            src_bucket,
+            destination.alias,
+            dst_bucket,
+            removed,
+            options.dry_run
         );
     }
 
@@ -1728,9 +1878,10 @@ FLAGS:
 #[cfg(test)]
 mod tests {
     use super::{
-        AliasConfig, AppConfig, build_complete_multipart_xml, extract_tag_values, looks_ready_xml,
-        parse_config, parse_globals, parse_target, serialize_config, sync_destination_key,
-        uri_encode_path, uri_encode_query_component, xml_unescape,
+        AliasConfig, AppConfig, build_complete_multipart_xml, extract_tag_values, is_excluded,
+        looks_ready_xml, parse_config, parse_globals, parse_sync_args, parse_target,
+        serialize_config, sync_destination_key, uri_encode_path, uri_encode_query_component,
+        wildcard_match, xml_unescape,
     };
     use std::collections::BTreeMap;
 
@@ -1815,6 +1966,33 @@ mod tests {
     #[test]
     fn uri_encode_query_component_works() {
         assert_eq!(uri_encode_query_component("a b/+"), "a%20b%2F%2B");
+    }
+
+    #[test]
+    fn wildcard_match_works() {
+        assert!(wildcard_match("*.tmp", "a.tmp"));
+        assert!(wildcard_match("foo/*/bar", "foo/x/bar"));
+        assert!(!wildcard_match("*.tmp", "a.txt"));
+    }
+
+    #[test]
+    fn parse_sync_args_with_flags() {
+        let args = vec![
+            "mirror".to_string(),
+            "--dry-run".to_string(),
+            "--remove".to_string(),
+            "--exclude".to_string(),
+            "*.tmp".to_string(),
+            "a/src/prefix".to_string(),
+            "b/dst/prefix".to_string(),
+        ];
+        let (opts, src, dst) = parse_sync_args(&args).expect("sync args should parse");
+        assert!(opts.dry_run);
+        assert!(opts.remove);
+        assert_eq!(opts.excludes, vec!["*.tmp".to_string()]);
+        assert_eq!(src.alias, "a");
+        assert_eq!(dst.alias, "b");
+        assert!(is_excluded("x.tmp", &opts.excludes));
     }
 
     #[test]
