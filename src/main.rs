@@ -4,7 +4,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
 struct AliasConfig {
@@ -91,7 +91,7 @@ fn run() -> Result<(), String> {
     match rest[0].as_str() {
         "alias" => handle_alias(&rest[1..], &mut config, &config_path, opts.json),
         "ls" | "mb" | "rb" | "put" | "get" | "rm" | "stat" | "cat" | "sync" | "mirror" | "cp"
-        | "mv" | "find" | "tree" | "head" | "pipe" => {
+        | "mv" | "find" | "tree" | "head" | "pipe" | "ping" | "ready" => {
             handle_s3_command(&rest, &config, opts.json, opts.debug)
         }
         _ => Err(format!("unknown command: {}", rest[0])),
@@ -253,6 +253,8 @@ fn handle_s3_command(
         && command != "tree"
         && command != "head"
         && command != "pipe"
+        && command != "ping"
+        && command != "ready"
         && args.len() <= target_idx
     {
         return Err(format!("usage: s4 {command} ..."));
@@ -328,6 +330,30 @@ fn handle_s3_command(
         let bucket = req_bucket(&target, "pipe")?;
         let key = req_key(&target, "pipe")?;
         return cmd_pipe(alias, &bucket, &key, json, debug);
+    }
+
+    if command == "ping" {
+        if args.len() < 2 {
+            return Err("usage: s4 ping <alias>".to_string());
+        }
+        let target = parse_target(&args[1])?;
+        let alias = config
+            .aliases
+            .get(&target.alias)
+            .ok_or_else(|| format!("unknown alias: {}", target.alias))?;
+        return cmd_ping(&target.alias, alias, json, debug);
+    }
+
+    if command == "ready" {
+        if args.len() < 2 {
+            return Err("usage: s4 ready <alias>".to_string());
+        }
+        let target = parse_target(&args[1])?;
+        let alias = config
+            .aliases
+            .get(&target.alias)
+            .ok_or_else(|| format!("unknown alias: {}", target.alias))?;
+        return cmd_ready(&target.alias, alias, json, debug);
     }
 
     if command == "sync" || command == "mirror" {
@@ -471,7 +497,9 @@ fn handle_s3_command(
             Ok(())
         }
         "sync" | "mirror" => unreachable!(),
-        "cp" | "mv" | "find" | "tree" | "head" | "pipe" => unreachable!(),
+        "cp" | "mv" | "find" | "tree" | "head" | "pipe" | "ping" | "ready" => {
+            unreachable!()
+        }
         _ => Err(format!("unsupported command: {command}")),
     }
 }
@@ -749,6 +777,44 @@ fn cmd_head(
     let body = s3_request(alias, "GET", bucket, Some(key), "", None, None, debug)?;
     for line in body.lines().take(lines) {
         println!("{}", line);
+    }
+    Ok(())
+}
+
+fn cmd_ping(alias_name: &str, alias: &AliasConfig, json: bool, debug: bool) -> Result<(), String> {
+    let start = Instant::now();
+    let _ = s3_request(alias, "GET", "", None, "", None, None, debug)?;
+    let ms = start.elapsed().as_millis();
+
+    if json {
+        println!(
+            "{{\"alias\":\"{}\",\"status\":\"ok\",\"latency_ms\":{}}}",
+            escape_json(alias_name),
+            ms
+        );
+    } else {
+        println!("{} is alive ({} ms)", alias_name, ms);
+    }
+    Ok(())
+}
+
+fn looks_ready_xml(body: &str) -> bool {
+    body.contains("<ListAllMyBucketsResult") || body.contains("<Error")
+}
+
+fn cmd_ready(alias_name: &str, alias: &AliasConfig, json: bool, debug: bool) -> Result<(), String> {
+    let body = s3_request(alias, "GET", "", None, "", None, None, debug)?;
+    if !looks_ready_xml(&body) {
+        return Err("ready check got unexpected response body".to_string());
+    }
+
+    if json {
+        println!(
+            "{{\"alias\":\"{}\",\"ready\":true}}",
+            escape_json(alias_name)
+        );
+    } else {
+        println!("{} is ready", alias_name);
     }
     Ok(())
 }
@@ -1315,6 +1381,8 @@ COMMANDS:
   tree       show object tree in bucket/prefix
   head       print first N lines from object
   pipe       upload stdin stream to object
+  ping       perform liveness check
+  ready      check that alias endpoint is ready
   version    print version
 
 FLAGS:
@@ -1330,8 +1398,8 @@ FLAGS:
 #[cfg(test)]
 mod tests {
     use super::{
-        AliasConfig, AppConfig, extract_tag_values, parse_config, parse_target, serialize_config,
-        sync_destination_key, uri_encode_path, xml_unescape,
+        AliasConfig, AppConfig, extract_tag_values, looks_ready_xml, parse_config, parse_target,
+        serialize_config, sync_destination_key, uri_encode_path, xml_unescape,
     };
     use std::collections::BTreeMap;
 
@@ -1394,5 +1462,14 @@ mod tests {
     #[test]
     fn xml_unescape_works() {
         assert_eq!(xml_unescape("a&amp;b&quot;c"), "a&b\"c");
+    }
+
+    #[test]
+    fn looks_ready_xml_accepts_known_payloads() {
+        assert!(looks_ready_xml(
+            "<ListAllMyBucketsResult></ListAllMyBucketsResult>"
+        ));
+        assert!(looks_ready_xml("<Error><Code>AccessDenied</Code></Error>"));
+        assert!(!looks_ready_xml("not-xml"));
     }
 }

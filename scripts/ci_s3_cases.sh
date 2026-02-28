@@ -36,6 +36,14 @@ target/debug/s4 -C "$CFG_DIR" alias set ci "$S4_E2E_ENDPOINT" "$S4_E2E_ACCESS_KE
 target/debug/s4 -C "$CFG_DIR" mb "ci/$SRC_BUCKET"
 target/debug/s4 -C "$CFG_DIR" mb "ci/$DST_BUCKET"
 
+
+# ping/ready coverage
+target/debug/s4 -C "$CFG_DIR" ping ci > "$WORKDIR/ping.out"
+rg -q "alive|latency_ms" "$WORKDIR/ping.out"
+
+target/debug/s4 -C "$CFG_DIR" ready ci > "$WORKDIR/ready.out"
+rg -q "ready" "$WORKDIR/ready.out"
+
 target/debug/s4 -C "$CFG_DIR" put "$SRC1" "ci/$SRC_BUCKET/photos/2024/a.txt"
 target/debug/s4 -C "$CFG_DIR" put "$SRC2" "ci/$SRC_BUCKET/photos/2024/b.txt"
 
