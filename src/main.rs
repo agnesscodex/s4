@@ -90,7 +90,9 @@ fn run() -> Result<(), String> {
     match rest[0].as_str() {
         "alias" => handle_alias(&rest[1..], &mut config, &config_path, opts.json),
         "ls" | "mb" | "rb" | "put" | "get" | "rm" | "stat" | "cat" | "sync" | "mirror" | "cp"
-        | "mv" => handle_s3_command(&rest, &config, opts.json, opts.debug),
+        | "mv" | "find" | "tree" | "head" => {
+            handle_s3_command(&rest, &config, opts.json, opts.debug)
+        }
         _ => Err(format!("unknown command: {}", rest[0])),
     }
 }
@@ -246,6 +248,9 @@ fn handle_s3_command(
         && command != "mirror"
         && command != "cp"
         && command != "mv"
+        && command != "find"
+        && command != "tree"
+        && command != "head"
         && args.len() <= target_idx
     {
         return Err(format!("usage: s4 {command} ..."));
@@ -256,6 +261,57 @@ fn handle_s3_command(
             return Err(format!("usage: s4 {command} <source> <target>"));
         }
         return cmd_cp_mv(command, config, &args[1], &args[2], json, debug);
+    }
+
+    if command == "find" {
+        if args.len() < 2 {
+            return Err("usage: s4 find <alias/bucket[/prefix]> [needle]".to_string());
+        }
+        let target = parse_target(&args[1])?;
+        let alias = config
+            .aliases
+            .get(&target.alias)
+            .ok_or_else(|| format!("unknown alias: {}", target.alias))?;
+        let bucket = req_bucket(&target, "find")?;
+        let prefix = target.key.clone().unwrap_or_default();
+        let needle = args.get(2).cloned();
+        return cmd_find(alias, &bucket, &prefix, needle.as_deref(), json, debug);
+    }
+
+    if command == "tree" {
+        if args.len() < 2 {
+            return Err("usage: s4 tree <alias/bucket[/prefix]>".to_string());
+        }
+        let target = parse_target(&args[1])?;
+        let alias = config
+            .aliases
+            .get(&target.alias)
+            .ok_or_else(|| format!("unknown alias: {}", target.alias))?;
+        let bucket = req_bucket(&target, "tree")?;
+        let prefix = target.key.clone().unwrap_or_default();
+        return cmd_tree(alias, &bucket, &prefix, json, debug);
+    }
+
+    if command == "head" {
+        if args.len() < 2 {
+            return Err("usage: s4 head <alias/bucket/key> [lines]".to_string());
+        }
+        let target = parse_target(&args[1])?;
+        let alias = config
+            .aliases
+            .get(&target.alias)
+            .ok_or_else(|| format!("unknown alias: {}", target.alias))?;
+        let bucket = req_bucket(&target, "head")?;
+        let key = req_key(&target, "head")?;
+        let lines = args
+            .get(2)
+            .map(|v| {
+                v.parse::<usize>()
+                    .map_err(|_| "head lines must be integer".to_string())
+            })
+            .transpose()?
+            .unwrap_or(10);
+        return cmd_head(alias, &bucket, &key, lines, debug);
     }
 
     if command == "sync" || command == "mirror" {
@@ -399,7 +455,7 @@ fn handle_s3_command(
             Ok(())
         }
         "sync" | "mirror" => unreachable!(),
-        "cp" | "mv" => unreachable!(),
+        "cp" | "mv" | "find" | "tree" | "head" => unreachable!(),
         _ => Err(format!("unsupported command: {command}")),
     }
 }
@@ -617,6 +673,67 @@ fn copy_object_s3_to_s3(src: &S3ObjectRef, dst: &S3ObjectRef, debug: bool) -> Re
         &headers,
         debug,
     )?;
+    Ok(())
+}
+
+fn cmd_find(
+    alias: &AliasConfig,
+    bucket: &str,
+    prefix: &str,
+    needle: Option<&str>,
+    json: bool,
+    debug: bool,
+) -> Result<(), String> {
+    let keys = list_object_keys(alias, bucket, prefix, debug)?;
+    for key in keys {
+        if let Some(n) = needle {
+            if !key.contains(n) {
+                continue;
+            }
+        }
+        if json {
+            println!(
+                "{{\"bucket\":\"{}\",\"key\":\"{}\"}}",
+                escape_json(bucket),
+                escape_json(&key)
+            );
+        } else {
+            println!("{}", key);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_tree(
+    alias: &AliasConfig,
+    bucket: &str,
+    prefix: &str,
+    _json: bool,
+    debug: bool,
+) -> Result<(), String> {
+    let mut keys = list_object_keys(alias, bucket, prefix, debug)?;
+    keys.sort();
+    println!("{}/", bucket);
+    for key in keys {
+        let depth = key.matches('/').count();
+        let indent = "  ".repeat(depth + 1);
+        let name = key.rsplit('/').next().unwrap_or(&key);
+        println!("{}{}", indent, name);
+    }
+    Ok(())
+}
+
+fn cmd_head(
+    alias: &AliasConfig,
+    bucket: &str,
+    key: &str,
+    lines: usize,
+    debug: bool,
+) -> Result<(), String> {
+    let body = s3_request(alias, "GET", bucket, Some(key), "", None, None, debug)?;
+    for line in body.lines().take(lines) {
+        println!("{}", line);
+    }
     Ok(())
 }
 
@@ -1115,7 +1232,37 @@ fn print_status(json: bool, field: &str, value: &str) {
 
 fn print_help() {
     println!(
-        "s4 - S3 client utility in Rust\n\nUSAGE:\n  s4 [FLAGS] COMMAND [ARGS]\n\nCOMMANDS:\n  alias      manage aliases in local config\n  ls         list buckets/objects\n  mb         make bucket\n  rb         remove bucket\n  put        upload object\n  get        download object\n  rm         remove object\n  stat       object metadata (raw headers)\n  cat        print object content\n  sync       sync objects from source bucket/prefix to destination\n  mirror     alias for sync (mc-compatible naming)\n  cp         copy object(s) between local and S3\n  mv         move object(s) between local and S3\n  version    print version\n\nFLAGS:\n  -C, --config-dir <DIR>\n  --json\n  --debug\n  --insecure\n  -h, --help\n  -v, --version"
+        "s4 - S3 client utility in Rust
+
+USAGE:
+  s4 [FLAGS] COMMAND [ARGS]
+
+COMMANDS:
+  alias      manage aliases in local config
+  ls         list buckets/objects
+  mb         make bucket
+  rb         remove bucket
+  put        upload object
+  get        download object
+  rm         remove object
+  stat       object metadata (raw headers)
+  cat        print object content
+  sync       sync objects from source bucket/prefix to destination
+  mirror     alias for sync (mc-compatible naming)
+  cp         copy object(s) between local and S3
+  mv         move object(s) between local and S3
+  find       find objects in bucket/prefix
+  tree       show object tree in bucket/prefix
+  head       print first N lines from object
+  version    print version
+
+FLAGS:
+  -C, --config-dir <DIR>
+  --json
+  --debug
+  --insecure
+  -h, --help
+  -v, --version"
     );
 }
 

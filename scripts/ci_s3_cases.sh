@@ -48,6 +48,16 @@ target/debug/s4 -C "$CFG_DIR" get "ci/$DST_BUCKET/mirror-copy/2024/b.txt" "$OUT2
 cmp -s "$SRC1" "$OUT1"
 cmp -s "$SRC2" "$OUT2"
 
+# find/tree/head coverage
+target/debug/s4 -C "$CFG_DIR" find "ci/$SRC_BUCKET/photos" "2024" > "$WORKDIR/find.out"
+rg -q "photos/2024/a.txt|2024/a.txt" "$WORKDIR/find.out"
+
+target/debug/s4 -C "$CFG_DIR" tree "ci/$SRC_BUCKET/photos" > "$WORKDIR/tree.out"
+rg -q "a.txt" "$WORKDIR/tree.out"
+
+target/debug/s4 -C "$CFG_DIR" head "ci/$SRC_BUCKET/photos/2024/a.txt" 1 > "$WORKDIR/head.out"
+rg -q "sync-one" "$WORKDIR/head.out"
+
 # cp/mv coverage
 CP_LOCAL="$WORKDIR/cp-local.txt"
 CP_BACK="$WORKDIR/cp-back.txt"

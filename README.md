@@ -6,7 +6,7 @@
 
 - Глобальные флаги: `-C/--config-dir`, `--json`, `--debug`, `--insecure`.
 - Управление alias: `alias set|ls|rm`.
-- S3-команды: `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `sync`, `mirror` (alias к `sync`), `cp`, `mv`.
+- S3-команды: `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `sync`, `mirror` (alias к `sync`), `cp`, `mv`, `find`, `tree`, `head`.
 - AWS SigV4 подпись запросов реализована через встроенный Python helper (`python3`) и HTTP-вызовы через `curl`.
 - Формат конфига: `~/.s4/config.toml`.
 
@@ -34,6 +34,11 @@ s4 mirror local/source-bucket local/destination-bucket
 s4 cp ./local.txt local/test-bucket/local.txt
 s4 cp local/test-bucket/local.txt ./local-copy.txt
 s4 mv local/test-bucket/local.txt local/test-bucket/local-moved.txt
+
+# поиск / дерево / head
+s4 find local/test-bucket photos
+s4 tree local/test-bucket
+s4 head local/test-bucket/local-moved.txt 5
 ```
 
 
@@ -101,6 +106,6 @@ GITHUB_TOKEN=... ./scripts/monitor_ci.sh --wait --rerun-failed --sha "$(git rev-
 
 ## Покрытие команд mc vs s4
 
-На текущем этапе в `s4` реализованы: `alias`, `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `sync`, `mirror`, `cp`, `mv`.
+На текущем этапе в `s4` реализованы: `alias`, `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `sync`, `mirror`, `cp`, `mv`, `find`, `tree`, `head`.
 
-Остальные команды из полного списка `mc` (например `admin`, `anonymous`, `find`, `tree`, `watch`, `replicate`, и т.д.) пока **не реализованы** и требуют отдельных итераций.
+Остальные команды из полного списка `mc` (например `admin`, `anonymous`, `watch`, `replicate`, `sql`, `tag`, и т.д.) пока **не реализованы** и требуют отдельных итераций.
