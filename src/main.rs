@@ -648,11 +648,11 @@ fn s3_request(
     }
 
     let mut cmd = Command::new("curl");
-    cmd.arg("-sS")
-        .arg("-X")
-        .arg(method)
-        .arg(&url)
-        .arg("-H")
+    cmd.arg("-sS").arg(&url);
+    if method != "HEAD" {
+        cmd.arg("-X").arg(method);
+    }
+    cmd.arg("-H")
         .arg(format!("Host: {}", endpoint.host))
         .arg("-H")
         .arg(format!("x-amz-date: {}", sign.amz_date))
@@ -666,7 +666,10 @@ fn s3_request(
     }
 
     if method == "HEAD" {
-        cmd.arg("-D").arg("-").arg("-o").arg("/dev/null");
+        // Use curl native HEAD mode instead of `-X HEAD` + body suppression.
+        // This avoids curl(18) "transfer closed with bytes remaining" on servers
+        // that return Content-Length for HEAD responses.
+        cmd.arg("-I");
     } else if let Some(out) = output_file {
         cmd.arg("-o").arg(out);
     }
