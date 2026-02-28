@@ -1,0 +1,72 @@
+# s4
+
+`s4` — CLI-утилита для S3/MinIO на Rust в стиле `mc`.
+
+## Что реализовано
+
+- Глобальные флаги: `-C/--config-dir`, `--json`, `--debug`, `--insecure`.
+- Управление alias: `alias set|ls|rm`.
+- S3-команды: `ls`, `mb`, `rb`, `put`, `get`, `rm`, `stat`, `cat`, `sync`.
+- AWS SigV4 подпись запросов реализована через встроенный Python helper (`python3`) и HTTP-вызовы через `curl`.
+- Формат конфига: `~/.s4/config.toml`.
+
+> Текущая сборка поддерживает только alias с `--path-style`.
+
+## Быстрый старт
+
+```bash
+s4 alias set local http://127.0.0.1:9000 minio minio123 --path-style
+s4 mb local/test-bucket
+echo hello > hello.txt
+s4 put hello.txt local/test-bucket/hello.txt
+s4 cat local/test-bucket/hello.txt
+s4 get local/test-bucket/hello.txt ./downloaded.txt
+s4 stat local/test-bucket/hello.txt
+s4 rm local/test-bucket/hello.txt
+s4 rb local/test-bucket
+
+# синхронизация (аналог mc mirror)
+s4 sync local/source-bucket local/destination-bucket
+```
+
+
+## Автоматизированный e2e
+
+Для полного smoke/e2e прогона добавлен скрипт `scripts/e2e.sh`.
+
+Пример запуска с вашим endpoint:
+
+```bash
+S4_E2E_ENDPOINT=http://63.141.251.44:10117 \
+S4_E2E_ACCESS_KEY=my-secret-key_id \
+S4_E2E_SECRET_KEY=my-secret-access-key \
+S4_E2E_REGION=us-east-1 \
+S4_E2E_PATH_STYLE=1 \
+./scripts/e2e.sh
+```
+
+Скрипт прогоняет: `alias set/ls/rm`, `ls`, `mb`, `put`, `stat`, `cat`, `get`, `rm`, `rb` и проверяет целостность загруженного/скачанного содержимого через `cmp`.
+
+
+## CI
+
+В репозитории добавлен workflow `.github/workflows/ci.yml`, который запускается:
+
+- на каждом `push`
+- на `pull_request` в `main`
+
+Пайплайн выполняет:
+
+1. `cargo fmt --all --check`
+2. `cargo test --all-targets`
+3. Интеграционные S3-кейсы против локального MinIO (`scripts/ci_s3_cases.sh`), включая `sync` (аналог `mc mirror`).
+4. На `push` в `main` — интеграционные S3-кейсы против удалённого endpoint из GitHub Secrets.
+
+### Секреты для remote S3 job
+
+Добавьте в `Settings -> Secrets and variables -> Actions`:
+
+- `S3_ENDPOINT` (например `63.141.251.44`)
+- `S3_ENDPOINT_PORT` (например `10117`)
+- `S3_ACCESS_KEY_ID` (например `my-secret-key_id`)
+- `S3_SECRET_ACCESS_KEY` (например `my-secret-access-key`)
