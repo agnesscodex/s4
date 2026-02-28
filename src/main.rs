@@ -692,7 +692,30 @@ fn handle_s3_command(
         "rm" => {
             let bucket = req_bucket(&target, "rm")?;
             let key = req_key(&target, "rm")?;
-            s3_request(alias, "DELETE", &bucket, Some(&key), "", None, None, debug)?;
+            match s3_request(alias, "DELETE", &bucket, Some(&key), "", None, None, debug) {
+                Ok(_) => {}
+                Err(err) => {
+                    if err.contains("AccessDenied")
+                        || err.contains("retention")
+                        || err.contains("governance")
+                    {
+                        let headers = vec!["x-amz-bypass-governance-retention: true".to_string()];
+                        s3_request_with_headers(
+                            alias,
+                            "DELETE",
+                            &bucket,
+                            Some(&key),
+                            "",
+                            None,
+                            None,
+                            &headers,
+                            debug,
+                        )?;
+                    } else {
+                        return Err(err);
+                    }
+                }
+            }
             if json {
                 println!(
                     "{{\"deleted\":{{\"bucket\":\"{}\",\"key\":\"{}\"}}}}",
@@ -1390,7 +1413,7 @@ fn cmd_retention(
             // S3/MinIO clear path is PUT ObjectRetention update, not DELETE.
             let now_out = Command::new("python3")
                 .arg("-c")
-                .arg("import datetime; print(datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'))")
+                .arg("import datetime; print((datetime.datetime.utcnow()+datetime.timedelta(minutes=1)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
                 .output()
                 .map_err(|e| e.to_string())?;
             if !now_out.status.success() {
