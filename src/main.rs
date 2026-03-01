@@ -2917,13 +2917,21 @@ fn s3_request(
     )
 }
 
+fn normalize_resolve_entry(entry: &str) -> String {
+    if entry.contains('=') {
+        entry.replacen('=', ":", 1)
+    } else {
+        entry.to_string()
+    }
+}
+
 fn apply_curl_global_flags(cmd: &mut Command, is_upload: bool, is_download: bool) {
     if CURL_INSECURE.load(Ordering::Relaxed) {
         cmd.arg("-k");
     }
     if let Ok(opts) = curl_global_opts().lock() {
         for resolve in &opts.resolve {
-            cmd.arg("--resolve").arg(resolve);
+            cmd.arg("--resolve").arg(normalize_resolve_entry(resolve));
         }
         if is_upload {
             if let Some(limit_upload) = &opts.limit_upload {
@@ -3619,9 +3627,9 @@ mod tests {
         AliasConfig, AppConfig, CorsCommand, EncryptCommand, EventCommand, IdpKind, IlmKind,
         LegalHoldCommand, ReplicateSubcommand, RetentionCommand, build_complete_multipart_xml,
         build_select_request_xml, extract_tag_blocks, extract_tag_values, extract_version_entries,
-        is_excluded, looks_ready_xml, normalize_sigv4_query, parse_config, parse_cors_args,
-        parse_encrypt_args, parse_event_args, parse_event_stream_records, parse_globals,
-        parse_human_duration, parse_idp_args, parse_ilm_args, parse_legalhold_args,
+        is_excluded, looks_ready_xml, normalize_resolve_entry, normalize_sigv4_query, parse_config,
+        parse_cors_args, parse_encrypt_args, parse_event_args, parse_event_stream_records,
+        parse_globals, parse_human_duration, parse_idp_args, parse_ilm_args, parse_legalhold_args,
         parse_replicate_args, parse_retention_args, parse_sql_args, parse_sync_args, parse_target,
         serialize_config, should_retry_with_governance_bypass, sync_destination_key,
         uri_encode_path, uri_encode_query_component, wildcard_match, xml_unescape,
@@ -3748,6 +3756,18 @@ mod tests {
         assert_eq!(
             normalize_sigv4_query("list-type=2&prefix=a"),
             "list-type=2&prefix=a"
+        );
+    }
+
+    #[test]
+    fn normalize_resolve_entry_supports_equals_and_colon_formats() {
+        assert_eq!(
+            normalize_resolve_entry("minio.local:9000=127.0.0.1"),
+            "minio.local:9000:127.0.0.1"
+        );
+        assert_eq!(
+            normalize_resolve_entry("minio.local:9000:127.0.0.1"),
+            "minio.local:9000:127.0.0.1"
         );
     }
 
