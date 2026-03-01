@@ -78,6 +78,11 @@ is_sql_unsupported_error() {
   has_pattern "status 501|<Code>NotImplemented</Code>|<Code>InvalidRequest</Code>.*Select|Select.*not supported|S3 Select is not enabled|Unsupported\s*operation|Unsupported.*Select|<Code>XNotImplemented</Code>|<Code>MethodNotAllowed</Code>" "$file"
 }
 
+is_sql_generic_400() {
+  local file="$1"
+  has_pattern "request failed with status 400(:|$)" "$file"
+}
+
 mark_capability_skipped() {
   local cap="$1"
   for existing in "${SKIPPED_CAPABILITIES[@]}"; do
@@ -286,6 +291,20 @@ else
   if is_sql_unsupported_error "$WORKDIR/sql-single.out"; then
     echo "[ci] skipping sql checks: S3 Select is not enabled/supported on remote endpoint" >&2
     mark_capability_skipped "s3-select"
+  elif is_sql_generic_400 "$WORKDIR/sql-single.out"; then
+    # Some S3-compatible services return a bare HTTP 400 for unsupported Select requests.
+    # Probe one more query to avoid hiding transient or query-specific failures.
+    if target/debug/s4 -C "$CFG_DIR" sql --csv-input "fh=USE" --query "select * from S3Object s limit 1" "ci/$SRC_BUCKET/sql/data.csv" > "$WORKDIR/sql-probe.out" 2>&1; then
+      cat "$WORKDIR/sql-probe.out" >&2
+      exit 1
+    fi
+    cat "$WORKDIR/sql-probe.out" >&2
+    if is_sql_unsupported_error "$WORKDIR/sql-probe.out" || is_sql_generic_400 "$WORKDIR/sql-probe.out"; then
+      echo "[ci] skipping sql checks: remote endpoint rejects S3 Select requests (generic 400)" >&2
+      mark_capability_skipped "s3-select"
+    else
+      exit 1
+    fi
   else
     exit 1
   fi
