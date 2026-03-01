@@ -26,6 +26,7 @@ SRC1="$WORKDIR/src1.txt"
 SRC2="$WORKDIR/src2.txt"
 OUT1="$WORKDIR/out1.txt"
 OUT2="$WORKDIR/out2.txt"
+SKIPPED_CAPABILITIES=()
 
 printf 'sync-one-%s\n' "$TS" > "$SRC1"
 printf 'sync-two-%s\n' "$TS" > "$SRC2"
@@ -75,6 +76,16 @@ is_object_lock_unsupported_error() {
 is_sql_unsupported_error() {
   local file="$1"
   has_pattern "status 501|<Code>NotImplemented</Code>|<Code>InvalidRequest</Code>.*Select|Select.*not supported|S3 Select is not enabled|Unsupported\s*operation|Unsupported.*Select|<Code>XNotImplemented</Code>|<Code>MethodNotAllowed</Code>" "$file"
+}
+
+mark_capability_skipped() {
+  local cap="$1"
+  for existing in "${SKIPPED_CAPABILITIES[@]}"; do
+    if [[ "$existing" == "$cap" ]]; then
+      return 0
+    fi
+  done
+  SKIPPED_CAPABILITIES+=("$cap")
 }
 
 # cors coverage
@@ -183,6 +194,7 @@ else
   cat "$WORKDIR/legalhold-set.out" >&2
   if is_object_lock_unsupported_error "$WORKDIR/legalhold-set.out"; then
     echo "[ci] skipping legalhold/retention checks: object lock is not enabled/supported on remote bucket" >&2
+    mark_capability_skipped "object-lock"
     target/debug/s4 -C "$CFG_DIR" rm "ci/$LH_BUCKET/lh.txt" || true
     target/debug/s4 -C "$CFG_DIR" rb "ci/$LH_BUCKET" || true
   else
@@ -273,6 +285,7 @@ else
   cat "$WORKDIR/sql-single.out" >&2
   if is_sql_unsupported_error "$WORKDIR/sql-single.out"; then
     echo "[ci] skipping sql checks: S3 Select is not enabled/supported on remote endpoint" >&2
+    mark_capability_skipped "s3-select"
   else
     exit 1
   fi
@@ -419,5 +432,9 @@ target/debug/s4 -C "$CFG_DIR" rm "ci/$SRC_BUCKET/sql/data.csv"
 target/debug/s4 -C "$CFG_DIR" rb "ci/$SRC_BUCKET"
 target/debug/s4 -C "$CFG_DIR" rb "ci/$DST_BUCKET"
 target/debug/s4 -C "$CFG_DIR" alias rm ci
+
+if (( ${#SKIPPED_CAPABILITIES[@]} > 0 )); then
+  echo "[ci] ⚠️ SKIPPED CAPABILITIES ⚠️: $(IFS=', '; echo "${SKIPPED_CAPABILITIES[*]}")"
+fi
 
 echo "[ci] S3 integration cases passed"
