@@ -223,7 +223,9 @@ if target/debug/s4 -C "$CFG_DIR" legalhold set "ci/$LH_BUCKET/lh.txt" > "$WORKDI
   target/debug/s4 -C "$CFG_DIR" retention clear "ci/$LH_BUCKET/lh.txt"
   target/debug/s4 -C "$CFG_DIR" get "ci/$LH_BUCKET/lh.txt" "$LH_GOT"
   cmp -s "$LH_LOCAL" "$LH_GOT"
-  target/debug/s4 -C "$CFG_DIR" rm "ci/$LH_BUCKET/lh.txt"
+  # Some object-lock servers deny DELETE without versionId even when governance bypass is used.
+  # Best-effort object delete first, then rely on `rb` version-purge path for authoritative cleanup.
+  target/debug/s4 -C "$CFG_DIR" rm "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/legalhold-rm.out" 2>&1 || true
   target/debug/s4 -C "$CFG_DIR" rb "ci/$LH_BUCKET"
 else
   cat "$WORKDIR/legalhold-set.out" >&2
