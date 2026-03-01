@@ -72,6 +72,11 @@ is_object_lock_unsupported_error() {
   has_pattern "Object Lock not enabled on bucket|ObjectLockConfigurationNotFoundError|InvalidRequest.*Object Lock|Object Lock configuration does not exist|XNotImplemented|NotImplemented" "$file"
 }
 
+is_sql_unsupported_error() {
+  local file="$1"
+  has_pattern "status 501|<Code>NotImplemented</Code>|<Code>InvalidRequest</Code>.*Select|Select.*not supported|S3 Select is not enabled|Unsupported\s*operation|Unsupported.*Select|<Code>XNotImplemented</Code>|<Code>MethodNotAllowed</Code>" "$file"
+}
+
 # cors coverage
 CORS_XML="$WORKDIR/cors.xml"
 cat > "$CORS_XML" <<'EOF'
@@ -260,10 +265,18 @@ printf 'id,name
 2,bob
 ' > "$SQL_CSV"
 target/debug/s4 -C "$CFG_DIR" put "$SQL_CSV" "ci/$SRC_BUCKET/sql/data.csv"
-target/debug/s4 -C "$CFG_DIR" sql --csv-input "fh=USE" --query "select count(*) from S3Object s" "ci/$SRC_BUCKET/sql/data.csv" > "$WORKDIR/sql-single.out"
-has_pattern "2" "$WORKDIR/sql-single.out"
-target/debug/s4 -C "$CFG_DIR" sql --recursive --csv-input "fh=USE" --query "select s.name from S3Object s" "ci/$SRC_BUCKET/sql" > "$WORKDIR/sql-recursive.out"
-has_pattern "alice|bob" "$WORKDIR/sql-recursive.out"
+if target/debug/s4 -C "$CFG_DIR" sql --csv-input "fh=USE" --query "select count(*) from S3Object s" "ci/$SRC_BUCKET/sql/data.csv" > "$WORKDIR/sql-single.out" 2>&1; then
+  has_pattern "2" "$WORKDIR/sql-single.out"
+  target/debug/s4 -C "$CFG_DIR" sql --recursive --csv-input "fh=USE" --query "select s.name from S3Object s" "ci/$SRC_BUCKET/sql" > "$WORKDIR/sql-recursive.out"
+  has_pattern "alice|bob" "$WORKDIR/sql-recursive.out"
+else
+  cat "$WORKDIR/sql-single.out" >&2
+  if is_sql_unsupported_error "$WORKDIR/sql-single.out"; then
+    echo "[ci] skipping sql checks: S3 Select is not enabled/supported on remote endpoint" >&2
+  else
+    exit 1
+  fi
+fi
 
 target/debug/s4 -C "$CFG_DIR" sync "ci/$SRC_BUCKET/photos" "ci/$DST_BUCKET/sync-copy"
 target/debug/s4 -C "$CFG_DIR" mirror "ci/$SRC_BUCKET/photos" "ci/$DST_BUCKET/mirror-copy"
