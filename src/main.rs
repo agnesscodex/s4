@@ -702,10 +702,7 @@ fn handle_s3_command(
             match s3_request(alias, "DELETE", &bucket, Some(&key), "", None, None, debug) {
                 Ok(_) => {}
                 Err(err) => {
-                    if err.contains("AccessDenied")
-                        || err.contains("retention")
-                        || err.contains("governance")
-                    {
+                    if should_retry_with_governance_bypass(&err) {
                         let headers = vec!["x-amz-bypass-governance-retention: true".to_string()];
                         s3_request_with_headers(
                             alias,
@@ -2785,11 +2782,7 @@ fn purge_bucket_versions(alias: &AliasConfig, bucket: &str, debug: bool) -> Resu
             debug,
         ) {
             Ok(_) => {}
-            Err(err)
-                if err.contains("AccessDenied")
-                    || err.contains("retention")
-                    || err.contains("governance") =>
-            {
+            Err(err) if should_retry_with_governance_bypass(&err) => {
                 let headers = vec!["x-amz-bypass-governance-retention: true".to_string()];
                 s3_request_with_headers(
                     alias,
@@ -2857,6 +2850,15 @@ fn xml_unescape(s: &str) -> String {
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&apos;", "'")
+}
+
+fn should_retry_with_governance_bypass(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("accessdenied")
+        || lower.contains("retention")
+        || lower.contains("governance")
+        || (lower.contains("invalidrequest") && lower.contains("worm"))
+        || lower.contains("worm protected")
 }
 
 fn req_bucket(target: &S3Target, cmd: &str) -> Result<String, String> {
@@ -3621,8 +3623,8 @@ mod tests {
         parse_encrypt_args, parse_event_args, parse_event_stream_records, parse_globals,
         parse_human_duration, parse_idp_args, parse_ilm_args, parse_legalhold_args,
         parse_replicate_args, parse_retention_args, parse_sql_args, parse_sync_args, parse_target,
-        serialize_config, sync_destination_key, uri_encode_path, uri_encode_query_component,
-        wildcard_match, xml_unescape,
+        serialize_config, should_retry_with_governance_bypass, sync_destination_key,
+        uri_encode_path, uri_encode_query_component, wildcard_match, xml_unescape,
     };
     use std::collections::BTreeMap;
 
@@ -3704,6 +3706,17 @@ mod tests {
             "archive/images/nested/cat.jpg"
         );
         assert_eq!(sync_destination_key("a.txt", "", ""), "a.txt");
+    }
+
+    #[test]
+    fn governance_bypass_retry_matches_worm_and_retention_errors() {
+        assert!(should_retry_with_governance_bypass("AccessDenied"));
+        assert!(should_retry_with_governance_bypass("retention policy"));
+        assert!(should_retry_with_governance_bypass("governance mode"));
+        assert!(should_retry_with_governance_bypass(
+            "InvalidRequest: Object is WORM protected and cannot be overwritten"
+        ));
+        assert!(!should_retry_with_governance_bypass("NoSuchBucket"));
     }
 
     #[test]
