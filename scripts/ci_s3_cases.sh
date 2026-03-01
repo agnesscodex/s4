@@ -19,8 +19,9 @@ CFG_DIR="$WORKDIR/config"
 trap 'rm -rf "$WORKDIR"' EXIT
 
 TS="$(date +%s)"
-SRC_BUCKET="s4-sync-src-${TS}"
-DST_BUCKET="s4-sync-dst-${TS}"
+RUN_ID="${TS}-$(openssl rand -hex 3 2>/dev/null || date +%N | tail -c 7)"
+SRC_BUCKET="s4-sync-src-${RUN_ID}"
+DST_BUCKET="s4-sync-dst-${RUN_ID}"
 SRC1="$WORKDIR/src1.txt"
 SRC2="$WORKDIR/src2.txt"
 OUT1="$WORKDIR/out1.txt"
@@ -64,6 +65,11 @@ run_or_skip_not_implemented() {
   fi
   cat "$out_file" >&2
   return 1
+}
+
+is_object_lock_unsupported_error() {
+  local file="$1"
+  has_pattern "Object Lock not enabled on bucket|ObjectLockConfigurationNotFoundError|InvalidRequest.*Object Lock|Object Lock configuration does not exist|XNotImplemented|NotImplemented" "$file"
 }
 
 # cors coverage
@@ -143,31 +149,41 @@ expect_placeholder_or_unknown "$WORKDIR/idp-ldap.out" target/debug/s4 -C "$CFG_D
 expect_placeholder_or_unknown "$WORKDIR/ilm-rule.out" target/debug/s4 -C "$CFG_DIR" ilm rule
 expect_placeholder_or_unknown "$WORKDIR/ilm-restore.out" target/debug/s4 -C "$CFG_DIR" ilm restore
 
-# legalhold coverage (requires bucket with object lock)
-LH_BUCKET="s4-legalhold-${TS}"
+# legalhold/retention coverage (requires bucket with object lock)
+LH_BUCKET="s4-legalhold-${RUN_ID}"
 LH_LOCAL="$WORKDIR/legalhold.txt"
 LH_GOT="$WORKDIR/legalhold-got.txt"
 printf 'legalhold-%s
 ' "$TS" > "$LH_LOCAL"
 target/debug/s4 -C "$CFG_DIR" mb --with-lock "ci/$LH_BUCKET"
 target/debug/s4 -C "$CFG_DIR" put "$LH_LOCAL" "ci/$LH_BUCKET/lh.txt"
-target/debug/s4 -C "$CFG_DIR" legalhold set "ci/$LH_BUCKET/lh.txt"
-target/debug/s4 -C "$CFG_DIR" legalhold info "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/legalhold-info-on.out"
-has_pattern "<Status>ON</Status>|ON" "$WORKDIR/legalhold-info-on.out"
-target/debug/s4 -C "$CFG_DIR" legalhold clear "ci/$LH_BUCKET/lh.txt"
-target/debug/s4 -C "$CFG_DIR" legalhold info "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/legalhold-info-off.out"
-has_pattern "<Status>OFF</Status>|OFF" "$WORKDIR/legalhold-info-off.out"
+if target/debug/s4 -C "$CFG_DIR" legalhold set "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/legalhold-set.out" 2>&1; then
+  target/debug/s4 -C "$CFG_DIR" legalhold info "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/legalhold-info-on.out"
+  has_pattern "<Status>ON</Status>|ON" "$WORKDIR/legalhold-info-on.out"
+  target/debug/s4 -C "$CFG_DIR" legalhold clear "ci/$LH_BUCKET/lh.txt"
+  target/debug/s4 -C "$CFG_DIR" legalhold info "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/legalhold-info-off.out"
+  has_pattern "<Status>OFF</Status>|OFF" "$WORKDIR/legalhold-info-off.out"
 
-# retention coverage (requires object-lock bucket)
-RET_UNTIL="2030-01-01T00:00:00Z"
-target/debug/s4 -C "$CFG_DIR" retention set "ci/$LH_BUCKET/lh.txt" --mode GOVERNANCE --retain-until "$RET_UNTIL"
-target/debug/s4 -C "$CFG_DIR" retention info "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/retention-info.out"
-has_pattern "GOVERNANCE|Mode|RetainUntilDate" "$WORKDIR/retention-info.out"
-target/debug/s4 -C "$CFG_DIR" retention clear "ci/$LH_BUCKET/lh.txt"
-target/debug/s4 -C "$CFG_DIR" get "ci/$LH_BUCKET/lh.txt" "$LH_GOT"
-cmp -s "$LH_LOCAL" "$LH_GOT"
-target/debug/s4 -C "$CFG_DIR" rm "ci/$LH_BUCKET/lh.txt"
-target/debug/s4 -C "$CFG_DIR" rb "ci/$LH_BUCKET"
+  # retention coverage (requires object-lock bucket)
+  RET_UNTIL="2030-01-01T00:00:00Z"
+  target/debug/s4 -C "$CFG_DIR" retention set "ci/$LH_BUCKET/lh.txt" --mode GOVERNANCE --retain-until "$RET_UNTIL"
+  target/debug/s4 -C "$CFG_DIR" retention info "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/retention-info.out"
+  has_pattern "GOVERNANCE|Mode|RetainUntilDate" "$WORKDIR/retention-info.out"
+  target/debug/s4 -C "$CFG_DIR" retention clear "ci/$LH_BUCKET/lh.txt"
+  target/debug/s4 -C "$CFG_DIR" get "ci/$LH_BUCKET/lh.txt" "$LH_GOT"
+  cmp -s "$LH_LOCAL" "$LH_GOT"
+  target/debug/s4 -C "$CFG_DIR" rm "ci/$LH_BUCKET/lh.txt"
+  target/debug/s4 -C "$CFG_DIR" rb "ci/$LH_BUCKET"
+else
+  cat "$WORKDIR/legalhold-set.out" >&2
+  if is_object_lock_unsupported_error "$WORKDIR/legalhold-set.out"; then
+    echo "[ci] skipping legalhold/retention checks: object lock is not enabled/supported on remote bucket" >&2
+    target/debug/s4 -C "$CFG_DIR" rm "ci/$LH_BUCKET/lh.txt" || true
+    target/debug/s4 -C "$CFG_DIR" rb "ci/$LH_BUCKET" || true
+  else
+    exit 1
+  fi
+fi
 
 # replicate coverage (placeholder behavior)
 if target/debug/s4 -C "$CFG_DIR" replicate ls "ci/$SRC_BUCKET" > "$WORKDIR/replicate-ls.out"; then
