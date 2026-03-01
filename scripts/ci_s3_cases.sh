@@ -6,6 +6,7 @@ set -euo pipefail
 : "${S4_E2E_SECRET_KEY:?S4_E2E_SECRET_KEY is required}"
 
 S4_E2E_REGION="${S4_E2E_REGION:-us-east-1}"
+S4_E2E_REMOTE_LIMITED="${S4_E2E_REMOTE_LIMITED:-0}"
 
 # First run full CRUD flow.
 S4_E2E_ALIAS="ci-e2e"
@@ -27,6 +28,7 @@ SRC2="$WORKDIR/src2.txt"
 OUT1="$WORKDIR/out1.txt"
 OUT2="$WORKDIR/out2.txt"
 SKIPPED_CAPABILITIES=()
+NOT_IMPLEMENTED_ON_SERVER=()
 
 printf 'sync-one-%s\n' "$TS" > "$SRC1"
 printf 'sync-two-%s\n' "$TS" > "$SRC2"
@@ -93,6 +95,27 @@ mark_capability_skipped() {
   SKIPPED_CAPABILITIES+=("$cap")
 }
 
+mark_not_implemented_on_server() {
+  local cap="$1"
+  for existing in "${NOT_IMPLEMENTED_ON_SERVER[@]}"; do
+    if [[ "$existing" == "$cap" ]]; then
+      return 0
+    fi
+  done
+  NOT_IMPLEMENTED_ON_SERVER+=("$cap")
+  mark_capability_skipped "$cap"
+}
+
+skip_if_remote_limited() {
+  local cap="$1"
+  if [[ "$S4_E2E_REMOTE_LIMITED" == "1" ]]; then
+    echo "[ci] skipping ${cap}: not implemented on remote server profile" >&2
+    mark_not_implemented_on_server "$cap"
+    return 0
+  fi
+  return 1
+}
+
 # cors coverage
 CORS_XML="$WORKDIR/cors.xml"
 cat > "$CORS_XML" <<'EOF'
@@ -114,6 +137,9 @@ if run_or_skip_not_implemented "$WORKDIR/cors-set.out" target/debug/s4 -C "$CFG_
 fi
 
 # encrypt coverage
+if skip_if_remote_limited "encryption"; then
+  :
+else
 ENC_XML="$WORKDIR/encryption.xml"
 cat > "$ENC_XML" <<'EOF'
 <ServerSideEncryptionConfiguration>
@@ -131,8 +157,12 @@ if run_or_skip_not_implemented "$WORKDIR/encrypt-set.out" target/debug/s4 -C "$C
     run_or_skip_not_implemented "$WORKDIR/encrypt-clear.out" target/debug/s4 -C "$CFG_DIR" encrypt clear "ci/$SRC_BUCKET" || true
   fi
 fi
+fi
 
 # event coverage
+if skip_if_remote_limited "event-notifications"; then
+  :
+else
 EVENT_XML="$WORKDIR/notification.xml"
 cat > "$EVENT_XML" <<'EOF'
 <NotificationConfiguration>
@@ -150,6 +180,7 @@ if run_or_skip_not_implemented "$WORKDIR/event-add.out" target/debug/s4 -C "$CFG
     run_or_skip_not_implemented "$WORKDIR/event-rm.out" target/debug/s4 -C "$CFG_DIR" event rm "ci/$SRC_BUCKET" --force || true
   fi
 fi
+fi
 
 
 expect_placeholder_or_unknown() {
@@ -163,12 +194,11 @@ expect_placeholder_or_unknown() {
 }
 
 # idp coverage (placeholder behavior)
-expect_placeholder_or_unknown "$WORKDIR/idp-openid.out" target/debug/s4 -C "$CFG_DIR" idp openid
-expect_placeholder_or_unknown "$WORKDIR/idp-ldap.out" target/debug/s4 -C "$CFG_DIR" idp ldap
+if skip_if_remote_limited "idp-openid"; then :; else expect_placeholder_or_unknown "$WORKDIR/idp-openid.out" target/debug/s4 -C "$CFG_DIR" idp openid; fi
+if skip_if_remote_limited "idp-ldap"; then :; else expect_placeholder_or_unknown "$WORKDIR/idp-ldap.out" target/debug/s4 -C "$CFG_DIR" idp ldap; fi
 
 # ilm coverage (placeholder behavior)
-expect_placeholder_or_unknown "$WORKDIR/ilm-rule.out" target/debug/s4 -C "$CFG_DIR" ilm rule
-expect_placeholder_or_unknown "$WORKDIR/ilm-restore.out" target/debug/s4 -C "$CFG_DIR" ilm restore
+if skip_if_remote_limited "ilm-advanced"; then :; else expect_placeholder_or_unknown "$WORKDIR/ilm-rule.out" target/debug/s4 -C "$CFG_DIR" ilm rule; expect_placeholder_or_unknown "$WORKDIR/ilm-restore.out" target/debug/s4 -C "$CFG_DIR" ilm restore; fi
 
 # legalhold/retention coverage (requires bucket with object lock)
 LH_BUCKET="s4-legalhold-${RUN_ID}"
@@ -207,7 +237,10 @@ else
   fi
 fi
 
-# replicate coverage (placeholder behavior)
+# replicate coverage
+if skip_if_remote_limited "replication"; then
+  :
+else
 if target/debug/s4 -C "$CFG_DIR" replicate ls "ci/$SRC_BUCKET" > "$WORKDIR/replicate-ls.out"; then
   has_pattern "not implemented" "$WORKDIR/replicate-ls.out"
 else
@@ -219,6 +252,7 @@ if target/debug/s4 -C "$CFG_DIR" replicate backlog "ci/$SRC_BUCKET" > "$WORKDIR/
 else
   echo "[ci] replicate backlog command unexpectedly failed" >&2
   exit 1
+fi
 fi
 
 # unsupported mc command compatibility checks (must fail explicitly until implemented)
@@ -232,20 +266,20 @@ expect_unknown_command() {
   has_pattern "unknown command|not implemented|usage:" "$out_file"
 }
 
-expect_unknown_command admin
-expect_unknown_command anonymous
-expect_unknown_command batch
+if skip_if_remote_limited "admin"; then :; else expect_unknown_command admin; fi
+if skip_if_remote_limited "anonymous-extras"; then :; else expect_unknown_command anonymous; fi
+if skip_if_remote_limited "batch-jobs"; then :; else expect_unknown_command batch; fi
 expect_unknown_command diff
 expect_unknown_command du
 expect_unknown_command od
-expect_unknown_command quota
-expect_unknown_command support
+if skip_if_remote_limited "bucket-quota"; then :; else expect_unknown_command quota; fi
+if skip_if_remote_limited "support"; then :; else expect_unknown_command support; fi
 expect_unknown_command share
 expect_unknown_command tag
 expect_unknown_command undo
 expect_unknown_command update
 expect_unknown_command watch
-expect_unknown_command license
+if skip_if_remote_limited "license"; then :; else expect_unknown_command license; fi
 
 # version command coverage
 S4_VERSION_OUT="$WORKDIR/version.out"
@@ -269,13 +303,20 @@ target/debug/s4 -C "$CFG_DIR"   --resolve "${EP_HOST}:${EP_PORT}=${EP_HOST}"   -
 target/debug/s4 -C "$CFG_DIR" ping ci > "$WORKDIR/ping.out"
 has_pattern "alive|latency_ms" "$WORKDIR/ping.out"
 
-target/debug/s4 -C "$CFG_DIR" ready ci > "$WORKDIR/ready.out"
-has_pattern "ready" "$WORKDIR/ready.out"
+if skip_if_remote_limited "ready"; then
+  :
+else
+  target/debug/s4 -C "$CFG_DIR" ready ci > "$WORKDIR/ready.out"
+  has_pattern "ready" "$WORKDIR/ready.out"
+fi
 
 target/debug/s4 -C "$CFG_DIR" put "$SRC1" "ci/$SRC_BUCKET/photos/2024/a.txt"
 target/debug/s4 -C "$CFG_DIR" put "$SRC2" "ci/$SRC_BUCKET/photos/2024/b.txt"
 
 # sql coverage (S3 Select API)
+if skip_if_remote_limited "s3-select"; then
+  :
+else
 SQL_CSV="$WORKDIR/sql-data.csv"
 printf 'id,name
 1,alice
@@ -308,6 +349,7 @@ else
   else
     exit 1
   fi
+fi
 fi
 
 target/debug/s4 -C "$CFG_DIR" sync "ci/$SRC_BUCKET/photos" "ci/$DST_BUCKET/sync-copy"
@@ -452,6 +494,9 @@ target/debug/s4 -C "$CFG_DIR" rb "ci/$SRC_BUCKET"
 target/debug/s4 -C "$CFG_DIR" rb "ci/$DST_BUCKET"
 target/debug/s4 -C "$CFG_DIR" alias rm ci
 
+if (( ${#NOT_IMPLEMENTED_ON_SERVER[@]} > 0 )); then
+  echo "[ci] ⚠️ NOT IMPLEMENTED ON THE SERVER ⚠️: $(IFS=', '; echo "${NOT_IMPLEMENTED_ON_SERVER[*]}")"
+fi
 if (( ${#SKIPPED_CAPABILITIES[@]} > 0 )); then
   echo "[ci] ⚠️ SKIPPED CAPABILITIES ⚠️: $(IFS=', '; echo "${SKIPPED_CAPABILITIES[*]}")"
 fi
