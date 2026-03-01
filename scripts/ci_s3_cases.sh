@@ -226,7 +226,17 @@ if target/debug/s4 -C "$CFG_DIR" legalhold set "ci/$LH_BUCKET/lh.txt" > "$WORKDI
   # Some object-lock servers deny DELETE without versionId even when governance bypass is used.
   # Best-effort object delete first, then rely on `rb` version-purge path for authoritative cleanup.
   target/debug/s4 -C "$CFG_DIR" rm "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/legalhold-rm.out" 2>&1 || true
-  target/debug/s4 -C "$CFG_DIR" rb "ci/$LH_BUCKET"
+  if target/debug/s4 -C "$CFG_DIR" rb "ci/$LH_BUCKET" > "$WORKDIR/legalhold-rb.out" 2>&1; then
+    cat "$WORKDIR/legalhold-rb.out"
+  else
+    cat "$WORKDIR/legalhold-rb.out" >&2
+    if [[ "$S4_E2E_REMOTE_LIMITED" == "1" ]] && has_pattern "AccessDenied|status 403|versionId is required|Object Lock" "$WORKDIR/legalhold-rb.out"; then
+      echo "[ci] skipping legalhold/retention cleanup strictness: remote server denied object-lock delete path" >&2
+      mark_not_implemented_on_server "object-lock"
+    else
+      exit 1
+    fi
+  fi
 else
   cat "$WORKDIR/legalhold-set.out" >&2
   if is_object_lock_unsupported_error "$WORKDIR/legalhold-set.out"; then
