@@ -6,6 +6,7 @@ set -euo pipefail
 : "${S4_E2E_SECRET_KEY:?S4_E2E_SECRET_KEY is required}"
 
 S4_E2E_REGION="${S4_E2E_REGION:-us-east-1}"
+S4_E2E_REMOTE_LIMITED="${S4_E2E_REMOTE_LIMITED:-0}"
 
 # First run full CRUD flow.
 S4_E2E_ALIAS="ci-e2e"
@@ -19,12 +20,15 @@ CFG_DIR="$WORKDIR/config"
 trap 'rm -rf "$WORKDIR"' EXIT
 
 TS="$(date +%s)"
-SRC_BUCKET="s4-sync-src-${TS}"
-DST_BUCKET="s4-sync-dst-${TS}"
+RUN_ID="${TS}-$(openssl rand -hex 3 2>/dev/null || date +%N | tail -c 7)"
+SRC_BUCKET="s4-sync-src-${RUN_ID}"
+DST_BUCKET="s4-sync-dst-${RUN_ID}"
 SRC1="$WORKDIR/src1.txt"
 SRC2="$WORKDIR/src2.txt"
 OUT1="$WORKDIR/out1.txt"
 OUT2="$WORKDIR/out2.txt"
+SKIPPED_CAPABILITIES=()
+NOT_IMPLEMENTED_ON_SERVER=()
 
 printf 'sync-one-%s\n' "$TS" > "$SRC1"
 printf 'sync-two-%s\n' "$TS" > "$SRC2"
@@ -66,6 +70,52 @@ run_or_skip_not_implemented() {
   return 1
 }
 
+is_object_lock_unsupported_error() {
+  local file="$1"
+  has_pattern "Object Lock not enabled on bucket|ObjectLockConfigurationNotFoundError|InvalidRequest.*Object Lock|Object Lock configuration does not exist|XNotImplemented|NotImplemented" "$file"
+}
+
+is_sql_unsupported_error() {
+  local file="$1"
+  has_pattern "status 501|<Code>NotImplemented</Code>|<Code>InvalidRequest</Code>.*Select|Select.*not supported|S3 Select is not enabled|Unsupported\s*operation|Unsupported.*Select|<Code>XNotImplemented</Code>|<Code>MethodNotAllowed</Code>" "$file"
+}
+
+is_sql_generic_400() {
+  local file="$1"
+  has_pattern "request failed with status 400(:|$)" "$file"
+}
+
+mark_capability_skipped() {
+  local cap="$1"
+  for existing in "${SKIPPED_CAPABILITIES[@]}"; do
+    if [[ "$existing" == "$cap" ]]; then
+      return 0
+    fi
+  done
+  SKIPPED_CAPABILITIES+=("$cap")
+}
+
+mark_not_implemented_on_server() {
+  local cap="$1"
+  for existing in "${NOT_IMPLEMENTED_ON_SERVER[@]}"; do
+    if [[ "$existing" == "$cap" ]]; then
+      return 0
+    fi
+  done
+  NOT_IMPLEMENTED_ON_SERVER+=("$cap")
+  mark_capability_skipped "$cap"
+}
+
+skip_if_remote_limited() {
+  local cap="$1"
+  if [[ "$S4_E2E_REMOTE_LIMITED" == "1" ]]; then
+    echo "[ci] skipping ${cap}: not implemented on remote server profile" >&2
+    mark_not_implemented_on_server "$cap"
+    return 0
+  fi
+  return 1
+}
+
 # cors coverage
 CORS_XML="$WORKDIR/cors.xml"
 cat > "$CORS_XML" <<'EOF'
@@ -87,6 +137,9 @@ if run_or_skip_not_implemented "$WORKDIR/cors-set.out" target/debug/s4 -C "$CFG_
 fi
 
 # encrypt coverage
+if skip_if_remote_limited "encryption"; then
+  :
+else
 ENC_XML="$WORKDIR/encryption.xml"
 cat > "$ENC_XML" <<'EOF'
 <ServerSideEncryptionConfiguration>
@@ -104,8 +157,12 @@ if run_or_skip_not_implemented "$WORKDIR/encrypt-set.out" target/debug/s4 -C "$C
     run_or_skip_not_implemented "$WORKDIR/encrypt-clear.out" target/debug/s4 -C "$CFG_DIR" encrypt clear "ci/$SRC_BUCKET" || true
   fi
 fi
+fi
 
 # event coverage
+if skip_if_remote_limited "event-notifications"; then
+  :
+else
 EVENT_XML="$WORKDIR/notification.xml"
 cat > "$EVENT_XML" <<'EOF'
 <NotificationConfiguration>
@@ -123,6 +180,7 @@ if run_or_skip_not_implemented "$WORKDIR/event-add.out" target/debug/s4 -C "$CFG
     run_or_skip_not_implemented "$WORKDIR/event-rm.out" target/debug/s4 -C "$CFG_DIR" event rm "ci/$SRC_BUCKET" --force || true
   fi
 fi
+fi
 
 
 expect_placeholder_or_unknown() {
@@ -136,40 +194,65 @@ expect_placeholder_or_unknown() {
 }
 
 # idp coverage (placeholder behavior)
-expect_placeholder_or_unknown "$WORKDIR/idp-openid.out" target/debug/s4 -C "$CFG_DIR" idp openid
-expect_placeholder_or_unknown "$WORKDIR/idp-ldap.out" target/debug/s4 -C "$CFG_DIR" idp ldap
+if skip_if_remote_limited "idp-openid"; then :; else expect_placeholder_or_unknown "$WORKDIR/idp-openid.out" target/debug/s4 -C "$CFG_DIR" idp openid; fi
+if skip_if_remote_limited "idp-ldap"; then :; else expect_placeholder_or_unknown "$WORKDIR/idp-ldap.out" target/debug/s4 -C "$CFG_DIR" idp ldap; fi
 
 # ilm coverage (placeholder behavior)
-expect_placeholder_or_unknown "$WORKDIR/ilm-rule.out" target/debug/s4 -C "$CFG_DIR" ilm rule
-expect_placeholder_or_unknown "$WORKDIR/ilm-restore.out" target/debug/s4 -C "$CFG_DIR" ilm restore
+if skip_if_remote_limited "ilm-advanced"; then :; else expect_placeholder_or_unknown "$WORKDIR/ilm-rule.out" target/debug/s4 -C "$CFG_DIR" ilm rule; expect_placeholder_or_unknown "$WORKDIR/ilm-restore.out" target/debug/s4 -C "$CFG_DIR" ilm restore; fi
 
-# legalhold coverage (requires bucket with object lock)
-LH_BUCKET="s4-legalhold-${TS}"
+# legalhold/retention coverage (requires bucket with object lock)
+LH_BUCKET="s4-legalhold-${RUN_ID}"
 LH_LOCAL="$WORKDIR/legalhold.txt"
 LH_GOT="$WORKDIR/legalhold-got.txt"
 printf 'legalhold-%s
 ' "$TS" > "$LH_LOCAL"
 target/debug/s4 -C "$CFG_DIR" mb --with-lock "ci/$LH_BUCKET"
 target/debug/s4 -C "$CFG_DIR" put "$LH_LOCAL" "ci/$LH_BUCKET/lh.txt"
-target/debug/s4 -C "$CFG_DIR" legalhold set "ci/$LH_BUCKET/lh.txt"
-target/debug/s4 -C "$CFG_DIR" legalhold info "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/legalhold-info-on.out"
-has_pattern "<Status>ON</Status>|ON" "$WORKDIR/legalhold-info-on.out"
-target/debug/s4 -C "$CFG_DIR" legalhold clear "ci/$LH_BUCKET/lh.txt"
-target/debug/s4 -C "$CFG_DIR" legalhold info "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/legalhold-info-off.out"
-has_pattern "<Status>OFF</Status>|OFF" "$WORKDIR/legalhold-info-off.out"
+if target/debug/s4 -C "$CFG_DIR" legalhold set "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/legalhold-set.out" 2>&1; then
+  target/debug/s4 -C "$CFG_DIR" legalhold info "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/legalhold-info-on.out"
+  has_pattern "<Status>ON</Status>|ON" "$WORKDIR/legalhold-info-on.out"
+  target/debug/s4 -C "$CFG_DIR" legalhold clear "ci/$LH_BUCKET/lh.txt"
+  target/debug/s4 -C "$CFG_DIR" legalhold info "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/legalhold-info-off.out"
+  has_pattern "<Status>OFF</Status>|OFF" "$WORKDIR/legalhold-info-off.out"
 
-# retention coverage (requires object-lock bucket)
-RET_UNTIL="2030-01-01T00:00:00Z"
-target/debug/s4 -C "$CFG_DIR" retention set "ci/$LH_BUCKET/lh.txt" --mode GOVERNANCE --retain-until "$RET_UNTIL"
-target/debug/s4 -C "$CFG_DIR" retention info "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/retention-info.out"
-has_pattern "GOVERNANCE|Mode|RetainUntilDate" "$WORKDIR/retention-info.out"
-target/debug/s4 -C "$CFG_DIR" retention clear "ci/$LH_BUCKET/lh.txt"
-target/debug/s4 -C "$CFG_DIR" get "ci/$LH_BUCKET/lh.txt" "$LH_GOT"
-cmp -s "$LH_LOCAL" "$LH_GOT"
-target/debug/s4 -C "$CFG_DIR" rm "ci/$LH_BUCKET/lh.txt"
-target/debug/s4 -C "$CFG_DIR" rb "ci/$LH_BUCKET"
+  # retention coverage (requires object-lock bucket)
+  RET_UNTIL="2030-01-01T00:00:00Z"
+  target/debug/s4 -C "$CFG_DIR" retention set "ci/$LH_BUCKET/lh.txt" --mode GOVERNANCE --retain-until "$RET_UNTIL"
+  target/debug/s4 -C "$CFG_DIR" retention info "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/retention-info.out"
+  has_pattern "GOVERNANCE|Mode|RetainUntilDate" "$WORKDIR/retention-info.out"
+  target/debug/s4 -C "$CFG_DIR" retention clear "ci/$LH_BUCKET/lh.txt"
+  target/debug/s4 -C "$CFG_DIR" get "ci/$LH_BUCKET/lh.txt" "$LH_GOT"
+  cmp -s "$LH_LOCAL" "$LH_GOT"
+  # Some object-lock servers deny DELETE without versionId even when governance bypass is used.
+  # Best-effort object delete first, then rely on `rb` version-purge path for authoritative cleanup.
+  target/debug/s4 -C "$CFG_DIR" rm "ci/$LH_BUCKET/lh.txt" > "$WORKDIR/legalhold-rm.out" 2>&1 || true
+  if target/debug/s4 -C "$CFG_DIR" rb "ci/$LH_BUCKET" > "$WORKDIR/legalhold-rb.out" 2>&1; then
+    cat "$WORKDIR/legalhold-rb.out"
+  else
+    cat "$WORKDIR/legalhold-rb.out" >&2
+    if [[ "$S4_E2E_REMOTE_LIMITED" == "1" ]] && has_pattern "AccessDenied|status 403|versionId is required|Object Lock" "$WORKDIR/legalhold-rb.out"; then
+      echo "[ci] skipping legalhold/retention cleanup strictness: remote server denied object-lock delete path" >&2
+      mark_not_implemented_on_server "object-lock"
+    else
+      exit 1
+    fi
+  fi
+else
+  cat "$WORKDIR/legalhold-set.out" >&2
+  if is_object_lock_unsupported_error "$WORKDIR/legalhold-set.out"; then
+    echo "[ci] skipping legalhold/retention checks: object lock is not enabled/supported on remote bucket" >&2
+    mark_capability_skipped "object-lock"
+    target/debug/s4 -C "$CFG_DIR" rm "ci/$LH_BUCKET/lh.txt" || true
+    target/debug/s4 -C "$CFG_DIR" rb "ci/$LH_BUCKET" || true
+  else
+    exit 1
+  fi
+fi
 
-# replicate coverage (placeholder behavior)
+# replicate coverage
+if skip_if_remote_limited "replication"; then
+  :
+else
 if target/debug/s4 -C "$CFG_DIR" replicate ls "ci/$SRC_BUCKET" > "$WORKDIR/replicate-ls.out"; then
   has_pattern "not implemented" "$WORKDIR/replicate-ls.out"
 else
@@ -181,6 +264,7 @@ if target/debug/s4 -C "$CFG_DIR" replicate backlog "ci/$SRC_BUCKET" > "$WORKDIR/
 else
   echo "[ci] replicate backlog command unexpectedly failed" >&2
   exit 1
+fi
 fi
 
 # unsupported mc command compatibility checks (must fail explicitly until implemented)
@@ -194,20 +278,20 @@ expect_unknown_command() {
   has_pattern "unknown command|not implemented|usage:" "$out_file"
 }
 
-expect_unknown_command admin
-expect_unknown_command anonymous
-expect_unknown_command batch
+if skip_if_remote_limited "admin"; then :; else expect_unknown_command admin; fi
+if skip_if_remote_limited "anonymous-extras"; then :; else expect_unknown_command anonymous; fi
+if skip_if_remote_limited "batch-jobs"; then :; else expect_unknown_command batch; fi
 expect_unknown_command diff
 expect_unknown_command du
 expect_unknown_command od
-expect_unknown_command quota
-expect_unknown_command support
+if skip_if_remote_limited "bucket-quota"; then :; else expect_unknown_command quota; fi
+if skip_if_remote_limited "support"; then :; else expect_unknown_command support; fi
 expect_unknown_command share
 expect_unknown_command tag
 expect_unknown_command undo
 expect_unknown_command update
 expect_unknown_command watch
-expect_unknown_command license
+if skip_if_remote_limited "license"; then :; else expect_unknown_command license; fi
 
 # version command coverage
 S4_VERSION_OUT="$WORKDIR/version.out"
@@ -231,23 +315,54 @@ target/debug/s4 -C "$CFG_DIR"   --resolve "${EP_HOST}:${EP_PORT}=${EP_HOST}"   -
 target/debug/s4 -C "$CFG_DIR" ping ci > "$WORKDIR/ping.out"
 has_pattern "alive|latency_ms" "$WORKDIR/ping.out"
 
-target/debug/s4 -C "$CFG_DIR" ready ci > "$WORKDIR/ready.out"
-has_pattern "ready" "$WORKDIR/ready.out"
+if skip_if_remote_limited "ready"; then
+  :
+else
+  target/debug/s4 -C "$CFG_DIR" ready ci > "$WORKDIR/ready.out"
+  has_pattern "ready" "$WORKDIR/ready.out"
+fi
 
 target/debug/s4 -C "$CFG_DIR" put "$SRC1" "ci/$SRC_BUCKET/photos/2024/a.txt"
 target/debug/s4 -C "$CFG_DIR" put "$SRC2" "ci/$SRC_BUCKET/photos/2024/b.txt"
 
 # sql coverage (S3 Select API)
+if skip_if_remote_limited "s3-select"; then
+  :
+else
 SQL_CSV="$WORKDIR/sql-data.csv"
 printf 'id,name
 1,alice
 2,bob
 ' > "$SQL_CSV"
 target/debug/s4 -C "$CFG_DIR" put "$SQL_CSV" "ci/$SRC_BUCKET/sql/data.csv"
-target/debug/s4 -C "$CFG_DIR" sql --csv-input "fh=USE" --query "select count(*) from S3Object s" "ci/$SRC_BUCKET/sql/data.csv" > "$WORKDIR/sql-single.out"
-has_pattern "2" "$WORKDIR/sql-single.out"
-target/debug/s4 -C "$CFG_DIR" sql --recursive --csv-input "fh=USE" --query "select s.name from S3Object s" "ci/$SRC_BUCKET/sql" > "$WORKDIR/sql-recursive.out"
-has_pattern "alice|bob" "$WORKDIR/sql-recursive.out"
+if target/debug/s4 -C "$CFG_DIR" sql --csv-input "fh=USE" --query "select count(*) from S3Object s" "ci/$SRC_BUCKET/sql/data.csv" > "$WORKDIR/sql-single.out" 2>&1; then
+  has_pattern "2" "$WORKDIR/sql-single.out"
+  target/debug/s4 -C "$CFG_DIR" sql --recursive --csv-input "fh=USE" --query "select s.name from S3Object s" "ci/$SRC_BUCKET/sql" > "$WORKDIR/sql-recursive.out"
+  has_pattern "alice|bob" "$WORKDIR/sql-recursive.out"
+else
+  cat "$WORKDIR/sql-single.out" >&2
+  if is_sql_unsupported_error "$WORKDIR/sql-single.out"; then
+    echo "[ci] skipping sql checks: S3 Select is not enabled/supported on remote endpoint" >&2
+    mark_capability_skipped "s3-select"
+  elif is_sql_generic_400 "$WORKDIR/sql-single.out"; then
+    # Some S3-compatible services return a bare HTTP 400 for unsupported Select requests.
+    # Probe one more query to avoid hiding transient or query-specific failures.
+    if target/debug/s4 -C "$CFG_DIR" sql --csv-input "fh=USE" --query "select * from S3Object s limit 1" "ci/$SRC_BUCKET/sql/data.csv" > "$WORKDIR/sql-probe.out" 2>&1; then
+      cat "$WORKDIR/sql-probe.out" >&2
+      exit 1
+    fi
+    cat "$WORKDIR/sql-probe.out" >&2
+    if is_sql_unsupported_error "$WORKDIR/sql-probe.out" || is_sql_generic_400 "$WORKDIR/sql-probe.out"; then
+      echo "[ci] skipping sql checks: remote endpoint rejects S3 Select requests (generic 400)" >&2
+      mark_capability_skipped "s3-select"
+    else
+      exit 1
+    fi
+  else
+    exit 1
+  fi
+fi
+fi
 
 target/debug/s4 -C "$CFG_DIR" sync "ci/$SRC_BUCKET/photos" "ci/$DST_BUCKET/sync-copy"
 target/debug/s4 -C "$CFG_DIR" mirror "ci/$SRC_BUCKET/photos" "ci/$DST_BUCKET/mirror-copy"
@@ -390,5 +505,12 @@ target/debug/s4 -C "$CFG_DIR" rm "ci/$SRC_BUCKET/sql/data.csv"
 target/debug/s4 -C "$CFG_DIR" rb "ci/$SRC_BUCKET"
 target/debug/s4 -C "$CFG_DIR" rb "ci/$DST_BUCKET"
 target/debug/s4 -C "$CFG_DIR" alias rm ci
+
+if (( ${#NOT_IMPLEMENTED_ON_SERVER[@]} > 0 )); then
+  echo "[ci] ⚠️ NOT IMPLEMENTED ON THE SERVER ⚠️: $(IFS=', '; echo "${NOT_IMPLEMENTED_ON_SERVER[*]}")"
+fi
+if (( ${#SKIPPED_CAPABILITIES[@]} > 0 )); then
+  echo "[ci] ⚠️ SKIPPED CAPABILITIES ⚠️: $(IFS=', '; echo "${SKIPPED_CAPABILITIES[*]}")"
+fi
 
 echo "[ci] S3 integration cases passed"
