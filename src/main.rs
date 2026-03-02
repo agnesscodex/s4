@@ -624,7 +624,14 @@ fn handle_s3_command(
         "ls" => cmd_ls(alias, &target, json, debug),
         "rb" => {
             let bucket = req_bucket(&target, "rb")?;
-            s3_request(alias, "DELETE", &bucket, None, "", None, None, debug)?;
+            if let Err(err) = s3_request(alias, "DELETE", &bucket, None, "", None, None, debug) {
+                if err.contains("BucketNotEmpty") {
+                    purge_bucket_versions(alias, &bucket, debug)?;
+                    s3_request(alias, "DELETE", &bucket, None, "", None, None, debug)?;
+                } else {
+                    return Err(err);
+                }
+            }
             print_status(json, "deleted", &bucket);
             Ok(())
         }
@@ -695,10 +702,7 @@ fn handle_s3_command(
             match s3_request(alias, "DELETE", &bucket, Some(&key), "", None, None, debug) {
                 Ok(_) => {}
                 Err(err) => {
-                    if err.contains("AccessDenied")
-                        || err.contains("retention")
-                        || err.contains("governance")
-                    {
+                    if should_retry_with_governance_bypass(&err) {
                         let headers = vec!["x-amz-bypass-governance-retention: true".to_string()];
                         s3_request_with_headers(
                             alias,
@@ -2666,6 +2670,138 @@ fn list_object_keys(
     Ok(keys)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ObjectVersion {
+    key: String,
+    version_id: String,
+}
+
+fn list_object_versions(
+    alias: &AliasConfig,
+    bucket: &str,
+    debug: bool,
+) -> Result<Vec<ObjectVersion>, String> {
+    let mut versions = Vec::new();
+    let mut key_marker: Option<String> = None;
+    let mut version_id_marker: Option<String> = None;
+
+    loop {
+        let mut query = String::from("versions=");
+        if let Some(marker) = key_marker.as_ref() {
+            query.push_str("&key-marker=");
+            query.push_str(&uri_encode_query_component(marker));
+        }
+        if let Some(marker) = version_id_marker.as_ref() {
+            query.push_str("&version-id-marker=");
+            query.push_str(&uri_encode_query_component(marker));
+        }
+
+        let body = s3_request(alias, "GET", bucket, None, &query, None, None, debug)?;
+        versions.extend(extract_version_entries(&body, "Version"));
+        versions.extend(extract_version_entries(&body, "DeleteMarker"));
+
+        let is_truncated = extract_tag_values(&body, "IsTruncated")
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "false".to_string())
+            .trim()
+            .eq("true");
+
+        if !is_truncated {
+            break;
+        }
+
+        key_marker = extract_tag_values(&body, "NextKeyMarker")
+            .into_iter()
+            .next()
+            .map(|v| xml_unescape(&v));
+        version_id_marker = extract_tag_values(&body, "NextVersionIdMarker")
+            .into_iter()
+            .next()
+            .map(|v| xml_unescape(&v));
+
+        if key_marker.is_none() {
+            break;
+        }
+    }
+
+    Ok(versions)
+}
+
+fn extract_tag_blocks(xml: &str, tag: &str) -> Vec<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+
+    let mut out = Vec::new();
+    let mut remaining = xml;
+
+    while let Some(start) = remaining.find(&open) {
+        let after_open = &remaining[start + open.len()..];
+        let Some(end) = after_open.find(&close) else {
+            break;
+        };
+        out.push(after_open[..end].to_string());
+        remaining = &after_open[end + close.len()..];
+    }
+
+    out
+}
+
+fn extract_version_entries(xml: &str, tag: &str) -> Vec<ObjectVersion> {
+    let mut out = Vec::new();
+    for block in extract_tag_blocks(xml, tag) {
+        let key = extract_tag_values(&block, "Key")
+            .into_iter()
+            .next()
+            .map(|v| xml_unescape(&v));
+        let version_id = extract_tag_values(&block, "VersionId")
+            .into_iter()
+            .next()
+            .map(|v| xml_unescape(&v));
+        if let (Some(key), Some(version_id)) = (key, version_id) {
+            out.push(ObjectVersion { key, version_id });
+        }
+    }
+    out
+}
+
+fn purge_bucket_versions(alias: &AliasConfig, bucket: &str, debug: bool) -> Result<(), String> {
+    for entry in list_object_versions(alias, bucket, debug)? {
+        let query = format!(
+            "versionId={}",
+            uri_encode_query_component(&entry.version_id)
+        );
+        match s3_request(
+            alias,
+            "DELETE",
+            bucket,
+            Some(&entry.key),
+            &query,
+            None,
+            None,
+            debug,
+        ) {
+            Ok(_) => {}
+            Err(err) if should_retry_with_governance_bypass(&err) => {
+                let headers = vec!["x-amz-bypass-governance-retention: true".to_string()];
+                s3_request_with_headers(
+                    alias,
+                    "DELETE",
+                    bucket,
+                    Some(&entry.key),
+                    &query,
+                    None,
+                    None,
+                    &headers,
+                    debug,
+                )?;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
 fn sync_destination_key(source_key: &str, src_prefix: &str, dst_prefix: &str) -> String {
     let normalized_src = src_prefix.trim_matches('/');
     let mut relative = source_key.to_string();
@@ -2714,6 +2850,15 @@ fn xml_unescape(s: &str) -> String {
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&apos;", "'")
+}
+
+fn should_retry_with_governance_bypass(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("accessdenied")
+        || lower.contains("retention")
+        || lower.contains("governance")
+        || (lower.contains("invalidrequest") && lower.contains("worm"))
+        || lower.contains("worm protected")
 }
 
 fn req_bucket(target: &S3Target, cmd: &str) -> Result<String, String> {
@@ -2772,13 +2917,21 @@ fn s3_request(
     )
 }
 
+fn normalize_resolve_entry(entry: &str) -> String {
+    if entry.contains('=') {
+        entry.replacen('=', ":", 1)
+    } else {
+        entry.to_string()
+    }
+}
+
 fn apply_curl_global_flags(cmd: &mut Command, is_upload: bool, is_download: bool) {
     if CURL_INSECURE.load(Ordering::Relaxed) {
         cmd.arg("-k");
     }
     if let Ok(opts) = curl_global_opts().lock() {
         for resolve in &opts.resolve {
-            cmd.arg("--resolve").arg(resolve);
+            cmd.arg("--resolve").arg(normalize_resolve_entry(resolve));
         }
         if is_upload {
             if let Some(limit_upload) = &opts.limit_upload {
@@ -3473,11 +3626,12 @@ mod tests {
     use super::{
         AliasConfig, AppConfig, CorsCommand, EncryptCommand, EventCommand, IdpKind, IlmKind,
         LegalHoldCommand, ReplicateSubcommand, RetentionCommand, build_complete_multipart_xml,
-        build_select_request_xml, extract_tag_values, is_excluded, looks_ready_xml,
-        normalize_sigv4_query, parse_config, parse_cors_args, parse_encrypt_args, parse_event_args,
-        parse_event_stream_records, parse_globals, parse_human_duration, parse_idp_args,
-        parse_ilm_args, parse_legalhold_args, parse_replicate_args, parse_retention_args,
-        parse_sql_args, parse_sync_args, parse_target, serialize_config, sync_destination_key,
+        build_select_request_xml, extract_tag_blocks, extract_tag_values, extract_version_entries,
+        is_excluded, looks_ready_xml, normalize_resolve_entry, normalize_sigv4_query, parse_config,
+        parse_cors_args, parse_encrypt_args, parse_event_args, parse_event_stream_records,
+        parse_globals, parse_human_duration, parse_idp_args, parse_ilm_args, parse_legalhold_args,
+        parse_replicate_args, parse_retention_args, parse_sql_args, parse_sync_args, parse_target,
+        serialize_config, should_retry_with_governance_bypass, sync_destination_key,
         uri_encode_path, uri_encode_query_component, wildcard_match, xml_unescape,
     };
     use std::collections::BTreeMap;
@@ -3519,6 +3673,30 @@ mod tests {
     }
 
     #[test]
+    fn extract_tag_blocks_works() {
+        let xml =
+            "<Root><Version><Key>a.txt</Key></Version><Version><Key>b.txt</Key></Version></Root>";
+        let blocks = extract_tag_blocks(xml, "Version");
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks[0].contains("<Key>a.txt</Key>"));
+        assert!(blocks[1].contains("<Key>b.txt</Key>"));
+    }
+
+    #[test]
+    fn extract_version_entries_works_for_versions_and_delete_markers() {
+        let xml = "<ListVersionsResult><Version><Key>k1</Key><VersionId>v1</VersionId></Version><DeleteMarker><Key>k2</Key><VersionId>v2</VersionId></DeleteMarker></ListVersionsResult>";
+        let versions = extract_version_entries(xml, "Version");
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].key, "k1");
+        assert_eq!(versions[0].version_id, "v1");
+
+        let delete_markers = extract_version_entries(xml, "DeleteMarker");
+        assert_eq!(delete_markers.len(), 1);
+        assert_eq!(delete_markers[0].key, "k2");
+        assert_eq!(delete_markers[0].version_id, "v2");
+    }
+
+    #[test]
     fn extract_xml_keys() {
         let xml = "<ListBucketResult><Contents><Key>a.txt</Key></Contents><Contents><Key>dir/b.txt</Key></Contents></ListBucketResult>";
         let keys = extract_tag_values(xml, "Key");
@@ -3536,6 +3714,17 @@ mod tests {
             "archive/images/nested/cat.jpg"
         );
         assert_eq!(sync_destination_key("a.txt", "", ""), "a.txt");
+    }
+
+    #[test]
+    fn governance_bypass_retry_matches_worm_and_retention_errors() {
+        assert!(should_retry_with_governance_bypass("AccessDenied"));
+        assert!(should_retry_with_governance_bypass("retention policy"));
+        assert!(should_retry_with_governance_bypass("governance mode"));
+        assert!(should_retry_with_governance_bypass(
+            "InvalidRequest: Object is WORM protected and cannot be overwritten"
+        ));
+        assert!(!should_retry_with_governance_bypass("NoSuchBucket"));
     }
 
     #[test]
@@ -3567,6 +3756,18 @@ mod tests {
         assert_eq!(
             normalize_sigv4_query("list-type=2&prefix=a"),
             "list-type=2&prefix=a"
+        );
+    }
+
+    #[test]
+    fn normalize_resolve_entry_supports_equals_and_colon_formats() {
+        assert_eq!(
+            normalize_resolve_entry("minio.local:9000=127.0.0.1"),
+            "minio.local:9000:127.0.0.1"
+        );
+        assert_eq!(
+            normalize_resolve_entry("minio.local:9000:127.0.0.1"),
+            "minio.local:9000:127.0.0.1"
         );
     }
 
