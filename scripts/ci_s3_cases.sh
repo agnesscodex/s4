@@ -377,7 +377,7 @@ cmp -s "$SRC2" "$OUT2"
 DRYRUN_OUT="$WORKDIR/dryrun.out"
 target/debug/s4 -C "$CFG_DIR" mirror --dry-run "ci/$SRC_BUCKET/photos" "ci/$DST_BUCKET/dry-run" > "$DRYRUN_OUT"
 has_pattern "dry-run: true" "$DRYRUN_OUT"
-if target/debug/s4 -C "$CFG_DIR" get "ci/$DST_BUCKET/dry-run/2024/a.txt" "$WORKDIR/dryrun-got.txt"; then
+if target/debug/s4 -C "$CFG_DIR" get "ci/$DST_BUCKET/dry-run/2024/a.txt" "$WORKDIR/dryrun-got.txt" >/dev/null 2>&1; then
   echo "[ci] dry-run unexpectedly copied object" >&2
   exit 1
 fi
@@ -388,7 +388,7 @@ printf 'exclude-me-%s
 ' "$TS" > "$EXCL_LOCAL"
 target/debug/s4 -C "$CFG_DIR" put "$EXCL_LOCAL" "ci/$SRC_BUCKET/photos/2024/exclude.tmp"
 target/debug/s4 -C "$CFG_DIR" sync --exclude "*.tmp" "ci/$SRC_BUCKET/photos" "ci/$DST_BUCKET/exclude-copy"
-if target/debug/s4 -C "$CFG_DIR" get "ci/$DST_BUCKET/exclude-copy/2024/exclude.tmp" "$WORKDIR/exclude-got.tmp"; then
+if target/debug/s4 -C "$CFG_DIR" get "ci/$DST_BUCKET/exclude-copy/2024/exclude.tmp" "$WORKDIR/exclude-got.tmp" >/dev/null 2>&1; then
   echo "[ci] --exclude did not filter *.tmp" >&2
   exit 1
 fi
@@ -396,7 +396,7 @@ fi
 # --remove should delete extraneous object on destination
 target/debug/s4 -C "$CFG_DIR" cp "$SRC1" "ci/$DST_BUCKET/sync-copy/2024/extraneous.txt"
 target/debug/s4 -C "$CFG_DIR" sync --remove "ci/$SRC_BUCKET/photos" "ci/$DST_BUCKET/sync-copy"
-if target/debug/s4 -C "$CFG_DIR" get "ci/$DST_BUCKET/sync-copy/2024/extraneous.txt" "$WORKDIR/extraneous.txt"; then
+if target/debug/s4 -C "$CFG_DIR" get "ci/$DST_BUCKET/sync-copy/2024/extraneous.txt" "$WORKDIR/extraneous.txt" >/dev/null 2>&1; then
   echo "[ci] --remove did not clean extraneous object" >&2
   exit 1
 fi
@@ -404,7 +404,7 @@ fi
 
 # --older-than should skip fresh objects
 target/debug/s4 -C "$CFG_DIR" sync --older-than "365d" "ci/$SRC_BUCKET/photos" "ci/$DST_BUCKET/older-than"
-if target/debug/s4 -C "$CFG_DIR" get "ci/$DST_BUCKET/older-than/2024/a.txt" "$WORKDIR/older-than-a.txt"; then
+if target/debug/s4 -C "$CFG_DIR" get "ci/$DST_BUCKET/older-than/2024/a.txt" "$WORKDIR/older-than-a.txt" >/dev/null 2>&1; then
   echo "[ci] --older-than unexpectedly copied fresh object" >&2
   exit 1
 fi
@@ -498,6 +498,7 @@ target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/exclude-copy/2024/a.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/exclude-copy/2024/b.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/newer-than/2024/a.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/newer-than/2024/b.txt"
+target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/newer-than/2024/exclude.tmp"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$SRC_BUCKET/photos/2024/watch.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/watch-copy/2024/watch.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$SRC_BUCKET/sql/data.csv"
