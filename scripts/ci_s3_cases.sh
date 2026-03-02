@@ -116,6 +116,31 @@ skip_if_remote_limited() {
   return 1
 }
 
+purge_bucket_objects_best_effort() {
+  local alias_name="$1"
+  local bucket_name="$2"
+  local xml_out="$WORKDIR/purge-${bucket_name}.xml"
+  local keys_out="$WORKDIR/purge-${bucket_name}.keys"
+
+  if ! target/debug/s4 -C "$CFG_DIR" ls "${alias_name}/${bucket_name}" > "$xml_out" 2>/dev/null; then
+    return 0
+  fi
+
+  python3 - "$xml_out" > "$keys_out" <<'PYKEYS'
+import html
+import re
+import sys
+text = open(sys.argv[1], "r", encoding="utf-8", errors="ignore").read()
+for key in re.findall(r"<Key>(.*?)</Key>", text, flags=re.S):
+    print(html.unescape(key.strip()))
+PYKEYS
+
+  while IFS= read -r key; do
+    [[ -z "$key" ]] && continue
+    target/debug/s4 -C "$CFG_DIR" rm "${alias_name}/${bucket_name}/${key}" >/dev/null 2>&1 || true
+  done < "$keys_out"
+}
+
 # cors coverage
 CORS_XML="$WORKDIR/cors.xml"
 cat > "$CORS_XML" <<'EOF'
@@ -504,6 +529,8 @@ target/debug/s4 -C "$CFG_DIR" rm "ci/$SRC_BUCKET/photos/2024/watch.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$DST_BUCKET/watch-copy/2024/watch.txt"
 target/debug/s4 -C "$CFG_DIR" rm "ci/$SRC_BUCKET/sql/data.csv"
 
+purge_bucket_objects_best_effort "ci" "$SRC_BUCKET"
+purge_bucket_objects_best_effort "ci" "$DST_BUCKET"
 target/debug/s4 -C "$CFG_DIR" rb "ci/$SRC_BUCKET"
 target/debug/s4 -C "$CFG_DIR" rb "ci/$DST_BUCKET"
 target/debug/s4 -C "$CFG_DIR" alias rm ci
